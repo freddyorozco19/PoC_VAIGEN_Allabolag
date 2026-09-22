@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Tokens de diseño copiados del mockup interactivo validado
+ * (Claude Artifact "Siffra MVP") para no perder el diseño ya revisado.
+ */
+:root {
+  --bg: #f3f6f7;
+  --surface: #ffffff;
+  --surface2: #e9eff1;
+  --ink: #0f2530;
+  --ink2: #4a626d;
+  --line: #d2dde1;
+  --accent: #0b6e75;
+  --accent-ink: #ffffff;
+  --accent-soft: #d5ecee;
+  --gold: #8a5508;
+  --good: #1c7c4d;
+  --good-soft: #d8efe2;
+  --warn: #a8650a;
+  --warn-soft: #f8e8c9;
+  --bad: #b03a2e;
+  --bad-soft: #f6dcd8;
+  --bar: #0b6e75;
+  --bar2: #9bc7cb;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b1a21;
+  --surface: #12262f;
+  --surface2: #183340;
+  --ink: #e6f0f2;
+  --ink2: #93aeb8;
+  --line: #25404b;
+  --accent: #4fc1c8;
+  --accent-ink: #06222a;
+  --accent-soft: #16414a;
+  --gold: #e0a54a;
+  --good: #5ccf95;
+  --good-soft: #153a29;
+  --warn: #e6ac55;
+  --warn-soft: #3d2d10;
+  --bad: #ef8b7e;
+  --bad-soft: #40201c;
+  --bar: #4fc1c8;
+  --bar2: #2b5e66;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0b1a21;
+    --surface: #12262f;
+    --surface2: #183340;
+    --ink: #e6f0f2;
+    --ink2: #93aeb8;
+    --line: #25404b;
+    --accent: #4fc1c8;
+    --accent-ink: #06222a;
+    --accent-soft: #16414a;
+    --gold: #e0a54a;
+    --good: #5ccf95;
+    --good-soft: #153a29;
+    --warn: #e6ac55;
+    --warn-soft: #3d2d10;
+    --bad: #ef8b7e;
+    --bad-soft: #40201c;
+    --bar: #4fc1c8;
+    --bar2: #2b5e66;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body), system-ui, sans-serif;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display), system-ui, sans-serif;
+  line-height: 1.15;
+  margin: 0;
+}
+
+.example-badge {
+  display: inline-block;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border: 1px dashed var(--gold);
+  color: var(--gold);
+  border-radius: 4px;
+}
