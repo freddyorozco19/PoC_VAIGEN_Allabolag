@@ -1351,3 +1351,7 @@ kbd {
   }
   .blob { animation: none !important; }
 }
+
+/* Resultados del registro: las empresas dadas de baja se atenúan; sin ficha, el nombre no es un enlace */
+.dim .company-link, .dim .company-plain { color: var(--ink2); font-weight: 500; }
+.company-plain { font-weight: 600; color: var(--ink); }

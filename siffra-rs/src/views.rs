@@ -9,6 +9,7 @@ use crate::db::{Role, User};
 use crate::format::js_round;
 use crate::i18n::{self, Lang};
 use crate::model::*;
+use crate::registry::Hit;
 use crate::scb::SectorMedians;
 use crate::summary::generate_example_summary;
 use crate::util::{query_without, urlencode};
@@ -802,9 +803,53 @@ const SEARCH_SCRIPT: &str = r#"(function(){var i=document.getElementById('q');if
 if(i.value&&location.search.indexOf('q=')>-1&&!document.querySelector('[aria-sort]')){i.focus();var n=i.value.length;try{i.setSelectionRange(n,n);}catch(e){}}
 var t;i.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){i.form.submit();},350);});})();"#;
 
-pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, live: Option<&Organisation>) -> Markup {
+/// Resultados de la búsqueda por nombre en el índice del registro. `more`: hay más de los que se muestran.
+pub struct RegistryHits {
+    pub hits: Vec<Hit>,
+    pub more: bool,
+}
+
+/// Nombre de la forma jurídica (`AB-ORGFO` → "Aktiebolag"); si no hay traducción, el código sin sufijo.
+fn form_label(c: &Ctx, code: &str) -> String {
+    let key = format!("form.{}", code.trim_end_matches("-ORGFO").to_lowercase());
+    if i18n::has_key(&key) { c.t(&key).to_string() } else { code.trim_end_matches("-ORGFO").to_string() }
+}
+
+/// `5560125790` → `556012-5790`; cualquier otra forma (p. ej. una identidad de 12 dígitos) se deja tal cual.
+fn format_orgnr(orgnr: &str) -> String {
+    if orgnr.len() == 10 && orgnr.bytes().all(|b| b.is_ascii_digit()) { format!("{}-{}", &orgnr[..6], &orgnr[6..]) } else { orgnr.to_string() }
+}
+
+fn registry_row(c: &Ctx, h: &Hit) -> Markup {
+    // Solo las identidades que son número de organización tienen ficha en vivo; el resto no se puede abrir.
+    let linkable = h.id_type == "ORGNR-IDORG" && h.orgnr.len() == 10;
+    let city = h.city.clone().unwrap_or_default();
+    html! {
+        tr.dim[h.dereg.is_some()] {
+            td.top {
+                @if linkable {
+                    a.company-link href=(format!("/foretag/{}", h.orgnr)) { (h.name) }
+                } @else {
+                    span.company-plain { (h.name) }
+                }
+                div.org-sub {
+                    (format_orgnr(&h.orgnr)) " · " (form_label(c, &h.form))
+                    @if let Some(d) = &h.dereg { " · " (c.tf("live.deregistered", &[d])) }
+                    span.city-sub { (city) }
+                }
+            }
+            td.top.hide-sm { (city) }
+            td.top.right.num.mono { "—" }
+            td.top.right.num.mono.hide-sm { "—" }
+            td.top { "—" }
+        }
+    }
+}
+
+pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, live: Option<&Organisation>, registry: Option<&RegistryHits>) -> Markup {
     let mut results = search_example_companies(query);
     let live = live.filter(|_| results.is_empty());
+    let reg_hits: &[Hit] = registry.map(|r| r.hits.as_slice()).unwrap_or(&[]);
     let sort = sort.filter(|s| ["name", "revenue", "result"].contains(s));
     let dir = match dir {
         Some("asc") => "asc",
@@ -821,7 +866,7 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
         results.reverse();
     }
 
-    let total = results.len() + usize::from(live.is_some());
+    let total = results.len() + usize::from(live.is_some()) + reg_hits.len();
     let count_text = if query.trim().is_empty() {
         c.tf(if total == 1 { "sok.count.one_company" } else { "sok.count.companies" }, &[&total.to_string()])
     } else {
@@ -891,7 +936,8 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
                                 td.top { "—" }
                             }
                         }
-                        @if results.is_empty() && live.is_none() {
+                        @for h in reg_hits { (registry_row(c, h)) }
+                        @if results.is_empty() && live.is_none() && reg_hits.is_empty() {
                             tr {
                                 td colspan="5" {
                                     div.empty-state {
@@ -912,8 +958,12 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
             }
             @if live.is_some() {
                 p.note { (c.t("sok.note.live")) }
-            } @else {
+            } @else if reg_hits.is_empty() {
                 p.note { (example_badge(c)) " " (c.t("sok.note.example")) }
+            } @else {
+                p.note { (c.t("sok.note.registry")) }
+                @if registry.is_some_and(|r| r.more) { p.note { (c.tf("sok.registry_more", &[&reg_hits.len().to_string()])) } }
+                @if !results.is_empty() { p.note { (example_badge(c)) " " (c.t("sok.note.example")) } }
             }
             // Filtrado "en vivo": reenvía el formulario al escribir (con retardo).
             script { (PreEscaped(SEARCH_SCRIPT)) }

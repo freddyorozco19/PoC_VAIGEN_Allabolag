@@ -13,6 +13,7 @@ use crate::auth::{self, Limiter, LANG_COOKIE, SESSION_COOKIE};
 use crate::bolagsverket;
 use crate::db::{Db, NewActivity, Role, User};
 use crate::i18n::{self, Lang};
+use crate::registry::RegistryHandle;
 use crate::util::{self, query_param, urlencode};
 use crate::views::Ctx;
 
@@ -22,11 +23,13 @@ pub struct AppState {
     pub limiter: Arc<Limiter>,
     /// Fuerza la marca `Secure` en las cookies (producción detrás de HTTPS). Si no, se deduce de `X-Forwarded-Proto`.
     pub force_secure: bool,
+    /// Índice de nombres de empresas (archivo oficial de Bolagsverket); vacío si no se ha cargado.
+    pub registry: Arc<RegistryHandle>,
 }
 
 impl AppState {
     pub fn new(db: Db) -> AppState {
-        AppState { db, limiter: Arc::new(Limiter::new()), force_secure: false }
+        AppState { db, limiter: Arc::new(Limiter::new()), force_secure: false, registry: RegistryHandle::none() }
     }
 }
 

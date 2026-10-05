@@ -76,7 +76,10 @@ pub struct SokParams {
     dir: Option<String>,
 }
 
-pub async fn sok(Extension(info): Info, Query(p): Query<SokParams>) -> Response {
+/// Cuántos resultados del registro se muestran como máximo (se pide uno más para saber si hay más).
+const REGISTRY_LIMIT: usize = 25;
+
+pub async fn sok(State(st): State<AppState>, Extension(info): Info, Query(p): Query<SokParams>) -> Response {
     let c = info.ctx();
     let q = p.q.as_deref().unwrap_or("");
     // Un organisationsnummer que no es de EJEMPLO se busca en Bolagsverket (si hay credenciales).
@@ -96,7 +99,23 @@ pub async fn sok(Extension(info): Info, Query(p): Query<SokParams>) -> Response 
     } else {
         None
     };
-    html(views::sok_page(&c, q, p.sort.as_deref(), p.dir.as_deref(), live.as_ref()))
+    // Búsqueda por nombre en el índice del registro (archivo oficial de Bolagsverket). Un número de organización
+    // no se busca aquí: lo resuelve la API en vivo.
+    let by_name = if live.is_none() && q.trim().chars().count() >= 2 && bolagsverket::normalize_org_number(q).is_none() {
+        match st.registry.get() {
+            Some(reg) => {
+                let query = q.to_string();
+                let mut hits = tokio::task::spawn_blocking(move || reg.search(&query, REGISTRY_LIMIT + 1, true)).await.unwrap_or_default();
+                let more = hits.len() > REGISTRY_LIMIT;
+                hits.truncate(REGISTRY_LIMIT);
+                Some(views::RegistryHits { hits, more })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    html(views::sok_page(&c, q, p.sort.as_deref(), p.dir.as_deref(), live.as_ref(), by_name.as_ref()))
 }
 
 #[derive(Deserialize)]

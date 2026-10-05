@@ -13,6 +13,7 @@ mod format;
 mod handlers;
 mod i18n;
 mod model;
+mod registry;
 mod scb;
 mod summary;
 mod util;
@@ -129,7 +130,16 @@ const USAGE: &str = "Uso:
                      [--lang es|en|sv] [--password-env VAR] [--must-change]
   siffra-rs user-reset LOGIN [--password-env VAR]     Cambia la contraseña de una cuenta
   siffra-rs user-list                                 Lista las cuentas
-  siffra-rs backup DESTINO                            Copia consistente de la base de datos";
+  siffra-rs backup DESTINO                            Copia consistente de la base de datos
+  siffra-rs registry-import ARCHIVO [--out registry.db] [--limit N]
+                                                      Carga bolagsverket_bulkfil.zip (o su .txt) en un índice de nombres
+  siffra-rs registry-stats [--db registry.db]         Cifras del índice (filas, activas, por tipo de identidad y forma)
+  siffra-rs registry-search TEXTO [--db registry.db] [--all] [--limit N]
+                                                      Busca por nombre (--all incluye las dadas de baja)";
+
+fn registry_path(args: &[String], flag_name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(flag(args, flag_name).or_else(|| std::env::var("SIFFRA_REGISTRY").ok()).unwrap_or_else(|| "registry.db".into()))
+}
 
 /// Ejecuta un subcomando y devuelve `true` si lo era (entonces no se inicia el servidor).
 fn run_cli(args: &[String]) -> bool {
@@ -203,6 +213,54 @@ fn run_cli(args: &[String]) -> bool {
             }
             true
         }
+        "registry-import" => {
+            let src = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            let out = registry_path(rest, "--out");
+            let limit = flag(rest, "--limit").and_then(|l| l.parse::<u64>().ok());
+            let reader = registry::open_source(std::path::Path::new(&src)).unwrap_or_else(|e| fail(&e));
+            let started = std::time::Instant::now();
+            let source = std::path::Path::new(&src).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(src.clone());
+            let report = registry::import(reader, &out, limit, &source, 200_000, |n| {
+                eprintln!("  {n} filas leídas ({:.0} s)", started.elapsed().as_secs_f64());
+            })
+            .unwrap_or_else(|e| fail(&format!("Importación fallida: {e}")));
+            println!(
+                "Importadas {} filas ({} leídas, {} sin la forma esperada) en {:.0} s → {}",
+                report.inserted,
+                report.read,
+                report.skipped,
+                started.elapsed().as_secs_f64(),
+                out.display()
+            );
+            true
+        }
+        "registry-stats" => {
+            let path = registry_path(rest, "--db");
+            let s = registry::Registry::open(&path).unwrap_or_else(|e| fail(&e)).stats();
+            println!("Índice {} (fuente {}, importado {})", path.display(), s.source, s.imported_at);
+            println!("Filas: {}   organizaciones distintas: {}   filas activas: {}", s.rows, s.distinct_orgnr, s.active_rows);
+            println!("Por tipo de identidad:");
+            for (k, n) in &s.by_id_type {
+                println!("  {k:<14} {n}");
+            }
+            println!("Por forma jurídica (filas / activas):");
+            for (k, n, a) in &s.by_form {
+                println!("  {k:<12} {n:>9} {a:>9}");
+            }
+            true
+        }
+        "registry-search" => {
+            let q = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            let reg = registry::Registry::open(&registry_path(rest, "--db")).unwrap_or_else(|e| fail(&e));
+            let limit = flag(rest, "--limit").and_then(|l| l.parse().ok()).unwrap_or(15);
+            let started = std::time::Instant::now();
+            let hits = reg.search(&q, limit, rest.iter().any(|a| a == "--all"));
+            for h in &hits {
+                println!("{}  {:<44} {:<10} {:<12} {}", h.orgnr, h.name, h.form, h.city.as_deref().unwrap_or("-"), h.dereg.as_deref().map(|d| format!("baja {d}")).unwrap_or_default());
+            }
+            println!("{} resultados en {:.1} ms", hits.len(), started.elapsed().as_secs_f64() * 1000.0);
+            true
+        }
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             true
@@ -229,6 +287,17 @@ async fn main() -> std::io::Result<()> {
     }
     let mut state = AppState::new(db.clone());
     state.force_secure = std::env::var("SIFFRA_SECURE_COOKIES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+    // Búsqueda por nombre: índice del archivo oficial de Bolagsverket. Con SIFFRA_REGISTRY_REFRESH=1 el servidor lo
+    // descarga solo (y lo renueva cada semana); sin esa variable solo usa el archivo que ya exista.
+    state.registry = registry::RegistryHandle::new(registry_path(&[], "--db"));
+    match state.registry.get() {
+        Some(r) => println!("Índice de empresas: {} filas", r.row_count()),
+        None => println!("Índice de empresas: sin cargar (la búsqueda por nombre no está disponible)"),
+    }
+    if std::env::var("SIFFRA_REGISTRY_REFRESH").is_ok_and(|v| v == "1") {
+        registry::spawn_auto_refresh(state.registry.clone());
+    }
 
     // Limpieza periódica: sesiones caducadas y registro de actividad con más de un año.
     tokio::spawn(async move {

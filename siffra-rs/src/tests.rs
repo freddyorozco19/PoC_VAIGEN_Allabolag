@@ -1185,3 +1185,132 @@ async fn live_bolagsverket_flow_with_fake_api() {
     std::env::remove_var("BOLAGSVERKET_CLIENT_SECRET");
     std::env::remove_var("BOLAGSVERKET_BASE_URL");
 }
+
+// ───────────────────────── Búsqueda por nombre en el registro ─────────────────────────
+
+/// Pone un índice de registro (con `data` en el formato del archivo de Bolagsverket) en el estado de la app.
+fn with_registry(f: &mut Fx, data: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("siffra-reg-{}", crate::util::random_hex(4)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("registry.db");
+    crate::registry::import(data.as_bytes(), &path, None, "prueba", 8_000, |_| {}).unwrap();
+    f.st.registry = crate::registry::RegistryHandle::new(path.clone());
+    path
+}
+
+#[tokio::test]
+async fn name_search_lists_registry_companies_and_links_only_real_organisation_numbers() {
+    let mut f = fx();
+    let path = with_registry(&mut f, crate::registry::tests::SAMPLE);
+    // Sociedad: enlace a su ficha, forma jurídica traducida, número con guion.
+    let r = f.get(&f.user_s, "/sok?q=fjallbruk&lang=es").await.body;
+    assert!(r.contains(r#"href="/foretag/5560000027""#), "{r}");
+    assert!(r.contains("556000-0027") && r.contains("Sociedad anónima (AB)") && r.contains("ÖSTERSUND"));
+    assert!(r.contains("Resultados del registro de empresas de Bolagsverket"));
+    assert!(r.contains("1 resultado para «fjallbruk»"));
+    // Persona física (identidad de 12 dígitos, dada de baja): se muestra pero no es un enlace, y se atenúa.
+    let p = f.get(&f.user_s, "/sok?q=ostlund&lang=es").await.body;
+    assert!(p.contains("Åsa Östlund") && p.contains("Dada de baja el 2010-10-14") && p.contains("Empresa individual"));
+    assert!(!p.contains("/foretag/199001019999"), "una identidad que no es organisationsnummer no tiene ficha");
+    assert!(p.contains(r#"class="dim""#));
+    // Mismas filas en sueco, con su vocabulario.
+    let sv = f.get(&f.user_s, "/sok?q=fjallbruk&lang=sv").await.body;
+    assert!(sv.contains("Aktiebolag") && sv.contains("1 träff för"));
+    // Sin coincidencias: estado vacío de siempre.
+    assert!(f.get(&f.user_s, "/sok?q=zzzzz&lang=es").await.body.contains("Sin resultados"));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn name_search_is_off_without_an_index_and_never_breaks_the_example_search() {
+    let f = fx();
+    let r = f.get(&f.user_s, "/sok?q=fjallbruk&lang=es").await.body;
+    assert!(r.contains("Sin resultados"), "sin índice no hay resultados por nombre");
+    assert!(!r.contains("Resultados del registro"));
+    // Las empresas de ejemplo siguen saliendo igual.
+    assert!(f.get(&f.user_s, "/sok?q=nordlys&lang=es").await.body.contains("Nordlys Logistik AB"));
+}
+
+#[tokio::test]
+async fn name_search_caps_the_list_and_says_so() {
+    let mut f = fx();
+    let mut data = String::from("organisationsidentitet;namnskyddslopnummer;registreringsland;organisationsnamn;organisationsform;avregistreringsdatum;avregistreringsorsak;pagandeAvvecklingsEllerOmstruktureringsforfarande;registreringsdatum;verksamhetsbeskrivning;postadress\n");
+    for i in 0..40 {
+        data.push_str(&format!("\"55600{i:05}$ORGNR-IDORG\";\"1\";\"SE-LAND\";\"Bolag {i} AB$FORETAGSNAMN-ORGNAM$2000-01-01\";\"AB-ORGFO\";\"\";\"\";\"\";\"2000-01-01\";\"\";\"Gatan 1$$MALMÖ$21100$SE-LAND\"\n"));
+    }
+    let path = with_registry(&mut f, &data);
+    let r = f.get(&f.user_s, "/sok?q=bolag&lang=es").await.body;
+    assert_eq!(r.matches("/foretag/55600").count(), 25, "máximo 25 filas");
+    assert!(r.contains("Se muestran los primeros 25 resultados"));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn name_search_page_has_no_missing_translations() {
+    let mut f = fx();
+    let path = with_registry(&mut f, crate::registry::tests::SAMPLE);
+    for lang in Lang::ALL {
+        for q in ["fjallbruk", "ostlund", "zzzzz"] {
+            let r = f.get(&f.sa_s, &format!("/sok?q={q}&lang={}", lang.code())).await;
+            assert!(!r.body.contains('⟦'), "{lang:?} {q}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn weekly_refresh_downloads_imports_and_swaps_the_index() {
+    use std::io::Write;
+    // Servidor local que sirve un zip con el archivo (como el de Bolagsverket) y otra ruta que da error.
+    async fn bulk() -> Response {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            w.start_file("bolagsverket_bulkfil.txt", opts).unwrap();
+            w.write_all(crate::registry::tests::SAMPLE.as_bytes()).unwrap();
+            w.finish().unwrap();
+        }
+        ([(header::CONTENT_TYPE, "application/zip")], buf.into_inner()).into_response()
+    }
+    async fn broken() -> StatusCode {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+    let app = Router::new().route("/bulk.zip", get(bulk)).route("/roto.zip", get(broken));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let dir = std::env::temp_dir().join(format!("siffra-refresh-{}", crate::util::random_hex(4)));
+    let handle = crate::registry::RegistryHandle::new(dir.join("registry.db"));
+    assert!(handle.get().is_none() && handle.age().is_none(), "al principio no hay índice");
+
+    // Un fallo de descarga no cambia nada.
+    let err = crate::registry::refresh(&handle, &format!("http://{addr}/roto.zip"), 0).await.unwrap_err();
+    assert!(err.contains("500"), "{err}");
+    assert!(handle.get().is_none());
+    // Una descarga demasiado pequeña (truncada) se rechaza.
+    let err = crate::registry::refresh(&handle, &format!("http://{addr}/bulk.zip"), 10_000_000).await.unwrap_err();
+    assert!(err.contains("más pequeña"), "{err}");
+    assert!(handle.get().is_none());
+
+    let report = crate::registry::refresh(&handle, &format!("http://{addr}/bulk.zip"), 0).await.unwrap();
+    assert_eq!((report.read, report.inserted), (3, 3));
+    let reg = handle.get().expect("índice en servicio");
+    assert_eq!(reg.search("fjallbruk", 5, true).len(), 1);
+    assert!(handle.age().unwrap() < std::time::Duration::from_secs(60), "recién renovado");
+    assert!(!dir.join("bulk/bolagsverket_bulkfil.zip").exists(), "el zip se borra tras importar");
+    assert!(!dir.join("bulk/bolagsverket_bulkfil.zip.part").exists());
+
+    // Segunda renovación: el índice anterior sigue respondiendo y luego se sustituye. Solo en Unix (el servidor):
+    // Windows no deja reemplazar un archivo que está abierto.
+    #[cfg(unix)]
+    {
+        let again = crate::registry::refresh(&handle, &format!("http://{addr}/bulk.zip"), 0).await.unwrap();
+        assert_eq!(again.inserted, 3);
+        assert_eq!(handle.get().unwrap().stats().rows, 3);
+        assert_eq!(reg.stats().rows, 3, "quien ya tenía el índice anterior no se ve afectado");
+    }
+    drop(reg);
+    let _ = std::fs::remove_dir_all(&dir);
+}

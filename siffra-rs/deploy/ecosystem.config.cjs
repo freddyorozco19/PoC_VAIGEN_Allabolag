@@ -11,8 +11,12 @@ module.exports = {
       SIFFRA_DB: "/root/siffra/data/siffra.db",
       // Detrás de HTTPS: las cookies de sesión llevan la marca Secure.
       SIFFRA_SECURE_COOKIES: "1",
+      // Búsqueda por nombre: índice del archivo oficial de Bolagsverket. El servidor lo descarga y lo renueva
+      // cada semana (SIFFRA_REGISTRY_REFRESH=1); la importación tarda ≈30 s y usa ≈100 MB extra de memoria.
+      SIFFRA_REGISTRY: "/root/siffra/data/registry.db",
+      SIFFRA_REGISTRY_REFRESH: "1",
     },
-    max_memory_restart: "300M",
+    max_memory_restart: "700M",
     autorestart: true,
     time: true,
   }],

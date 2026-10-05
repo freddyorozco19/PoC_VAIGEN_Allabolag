@@ -90,3 +90,14 @@ No hay copia automática instalada todavía.
 
 **Revertir nginx** (volver al acceso con clave básica): restaurar `/root/siffra/nginx-siffra.bak-20261005` en
 `/etc/nginx/sites-available/siffra`, `nginx -t && systemctl reload nginx`.
+
+## Índice de empresas (búsqueda por nombre)
+
+- Archivo: `/root/siffra/data/registry.db` (≈600 MB, permisos 600). pm2 fija `SIFFRA_REGISTRY` y `SIFFRA_REGISTRY_REFRESH=1`
+  (ver `deploy/ecosystem.config.cjs`): el servidor descarga solo el archivo de Bolagsverket y lo renueva cada semana.
+  No hace falta cron. `max_memory_restart` está en 700M por si acaso; durante la importación el servidor apenas usa memoria extra.
+- Primera carga a mano (o tras borrar el índice): `siffra-rs registry-import /ruta/bolagsverket_bulkfil.zip --out /root/siffra/data/registry.db`
+  (≈30 s). Para forzar una renovación: `touch -d "8 days ago" /root/siffra/data/registry.db && pm2 restart siffra`.
+- Disco: durante una renovación conviven el índice viejo, el zip (250 MB) y el nuevo `.part` (≈600 MB): reservar ≈1,5 GB libres.
+- **No reiniciar pm2 mientras se renueva** (los ≈4 minutos de descarga): se aborta y empieza de nuevo en el siguiente arranque.
+- Ver estado: `siffra-rs registry-stats --db /root/siffra/data/registry.db`.

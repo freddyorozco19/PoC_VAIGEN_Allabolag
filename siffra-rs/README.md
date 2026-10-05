@@ -75,6 +75,29 @@ siffra-rs backup /ruta/copia.db                   # copia consistente (VACUUM IN
 
 La primera cuenta se crea con `user-add` (sin cuentas el servidor avisa al arrancar).
 
+## Búsqueda por nombre (índice del registro)
+
+La API gratuita de Bolagsverket solo consulta por número de organización y, según su FAQ, buscar por nombre "no tiene
+fecha prevista". Para poder buscar por nombre, `src/registry.rs` usa el archivo oficial **`bolagsverket_bulkfil.zip`**
+de las *värdefulla datamängder* (gratis, sin contrato, se actualiza cada semana; ≈250 MB comprimido, ≈1 GB de texto,
+≈3 millones de filas). Se lee en streaming y se guarda en un SQLite aparte (`SIFFRA_REGISTRY`, por defecto
+`registry.db`, ≈600 MB) con un índice de texto FTS5: cada palabra es un prefijo, se exigen todas, no distingue
+mayúsculas ni tildes y busca en todos los nombres de la empresa (incluidos otros idiomas). Una consulta tarda 2–30 ms.
+
+- **No se filtra ninguna fila**: entran también las dadas de baja (casi dos tercios) y las identidades de 12 dígitos
+  (personnummer de autónomos, ≈1 millón). Las bajas salen atenuadas y detrás de las activas; las identidades que no son
+  número de organización se muestran sin enlace (no tienen ficha en vivo). **Decidir qué filtrar queda pendiente.**
+- No se guardan la descripción de la actividad ni la calle (la ficha en vivo las trae).
+- `/sok?q=texto` muestra hasta 25 resultados del registro además de las empresas de EJEMPLO; un número de organización
+  sigue resolviéndose con la API en vivo.
+- **Actualización:** con `SIFFRA_REGISTRY_REFRESH=1` el servidor comprueba cada 6 horas la edad del índice y, si falta o
+  tiene más de 7 días, descarga el archivo, construye un índice nuevo (≈30 s, caché de 32 MiB) y lo pone en servicio sin
+  parar; si algo falla se conserva el anterior. El zip se borra tras importar.
+- **A mano:** `siffra-rs registry-import bolagsverket_bulkfil.zip --out registry.db`, `registry-stats`, `registry-search "volvo"`.
+- **Licencia (sin confirmar):** las páginas de Bolagsverket que se pudieron leer no indican licencia para este archivo;
+  fuentes de terceros dicen CC BY 4.0 y otras CC0. La búsqueda cita la fuente en pantalla ("Bolagsverket"). Conviene
+  confirmarlo con Bolagsverket antes de abrir la aplicación a más gente.
+
 ## Interfaz: vidrio líquido
 
 Superficies translúcidas con desenfoque (`backdrop-filter`), borde de luz con brillo especular, sombras en capas con una
