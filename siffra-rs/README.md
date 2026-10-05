@@ -34,7 +34,55 @@ cargo test         # unidades + pruebas de las rutas (sin red)
 cargo test -- --ignored   # prueba contra el API real de SCB (requiere red)
 ```
 
-Requiere Rust estable (probado con 1.99). Las tipografías se cargan desde Google Fonts.
+Requiere Rust estable (probado con 1.99). Las tipografías se cargan desde Google Fonts. Para entrar en local, crea una cuenta: `SIFFRA_DB=siffra.db cargo run -- user-add --role superadmin --name "Yo" --username admin`.
+
+## Cuentas, roles e idiomas
+
+La aplicación exige iniciar sesión (nginx ya no pide clave). Las cuentas, las sesiones y el registro de actividad viven en
+SQLite (`SIFFRA_DB`, por defecto `siffra.db`).
+
+| Rol | Puede |
+|---|---|
+| `superadmin` | Todo: usuarios de cualquier rol (CRUD), **registro de actividad** (`/activity`, filtros, resumen por usuario, CSV). |
+| `admin` | CRUD solo de usuarios con rol `user`. No ve la actividad. |
+| `user` | Usar la aplicación y editar su propio perfil e idioma. |
+
+Salvaguardas: nadie se borra, se degrada ni se desactiva a sí mismo; nunca se elimina ni se degrada al último superadmin
+activo; un admin no puede asignar otros roles. Contraseñas con argon2id (parámetros OWASP), mínimo 10 caracteres,
+contraseña temporal que se muestra una sola vez y obliga a cambiarla, sesiones de 12 h (cookie `HttpOnly`, `SameSite=Lax`,
+`Secure` tras HTTPS; el token se guarda como hash), CSRF en todos los formularios, 5 intentos fallidos por IP o por
+usuario → bloqueo de 15 min, redirecciones de `?next=` solo internas.
+
+**Seguimiento** (`/activity`, solo superadmin): accesos correctos y fallidos, páginas vistas, búsquedas, empresas
+consultadas, cambios de cuentas y de idioma, exportaciones y accesos denegados, con hora (UTC), IP y navegador. Nunca se
+guardan contraseñas; los registros se conservan 365 días.
+
+**Idiomas:** español, inglés y sueco (`src/catalog.rs`, una fila `(clave, es, en, sv)` por texto). Se elige con
+`?lang=`, la cookie `lang`, el perfil o `Accept-Language` (por defecto, español). Los números siguen el formato de cada
+idioma (`64.100 mil SEK` / `64,100 kSEK` / `64 100 tkr`). Los tests comprueban que cada clave usada en el código existe,
+que las tres lenguas tienen texto con los mismos marcadores y que ninguna pantalla muestra una clave sin traducir. Los
+textos que vienen de Bolagsverket (actividad, forma jurídica) son del registro y se muestran en sueco.
+
+**Línea de comandos** (misma base de datos que el servidor):
+
+```bash
+siffra-rs user-add --role superadmin --name "Nombre" --username admin [--password-env VAR] [--must-change]
+siffra-rs user-add --role admin --name "Nombre" --email persona@dominio.co [--lang es|en|sv]
+siffra-rs user-reset LOGIN [--password-env VAR]   # sin --password-env genera una temporal
+siffra-rs user-list
+siffra-rs backup /ruta/copia.db                   # copia consistente (VACUUM INTO); el destino no debe existir
+```
+
+La primera cuenta se crea con `user-add` (sin cuentas el servidor avisa al arrancar).
+
+## Interfaz: vidrio líquido
+
+Superficies translúcidas con desenfoque (`backdrop-filter`), borde de luz con brillo especular, sombras en capas con una
+escala única de elevación y un fondo vivo de manchas de color que se desplazan despacio. Las superficies con texto son lo
+bastante opacas para cumplir WCAG AA sobre cualquier punto del fondo. Alternativas: sin `backdrop-filter`,
+`prefers-reduced-transparency` y `prefers-contrast: more` → superficies opacas; `prefers-reduced-motion` → fondo y
+animaciones quietos; `forced-colors` → bordes del sistema. La hoja de estilos lleva su huella en la URL
+(`/static/styles.css?v=…`) para que un cambio se vea de inmediato.
 
 ## Interfaz (refinada respecto al original)
 
@@ -59,7 +107,8 @@ Mismo mundo visual (paleta, tipografías, contenido), con la experiencia mejorad
 | `src/lib/format.ts` (`toLocaleString("sv-SE")`) | `src/format.rs` |
 | `src/lib/ai-summary.ts` | `src/summary.rs` |
 | `src/components/*`, `src/app/**/page.tsx` | `src/views.rs` |
-| `app/layout.tsx`, rutas, `redirect("/sok")`, `notFound()` | `src/main.rs` |
+| `app/layout.tsx`, rutas, `redirect("/sok")`, `notFound()` | `src/main.rs` (rutas y CLI), `src/handlers.rs` |
+| (nuevo) cuentas, sesiones, idiomas, actividad | `src/app.rs`, `src/auth.rs`, `src/db.rs`, `src/i18n.rs`, `src/catalog.rs`, `src/views_admin.rs` |
 | Tailwind + `globals.css` | `static/styles.css` (CSS a mano) |
 
 ## Diferencias deliberadas

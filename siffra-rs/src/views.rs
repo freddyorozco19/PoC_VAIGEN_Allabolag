@@ -1,21 +1,77 @@
-//! Layout, componentes y páginas. Equivale a `src/components/*` y `src/app/**/page.tsx`.
+//! Layout, componentes y páginas de empresa. Todo texto sale del catálogo de idiomas (`catalog.rs`):
+//! ninguna vista contiene texto visible escrito a mano, salvo nombres propios y datos de las fuentes.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use crate::annual_report::Financials;
 use crate::bolagsverket::Organisation;
-use crate::format::{format_int, format_tkr, js_round, percent1};
+use crate::db::{Role, User};
+use crate::format::js_round;
+use crate::i18n::{self, Lang};
 use crate::model::*;
 use crate::scb::SectorMedians;
 use crate::summary::generate_example_summary;
+use crate::util::{query_without, urlencode};
+
+// ───────────────────────── Contexto de la petición ─────────────────────────
+
+/// Lo que toda vista necesita saber: idioma, usuario, ruta actual y token CSRF.
+#[derive(Clone)]
+pub struct Ctx {
+    pub lang: Lang,
+    pub user: Option<User>,
+    pub path: String,
+    pub query: String,
+    pub csrf: String,
+}
+
+impl Ctx {
+    #[cfg(test)]
+    pub fn new(lang: Lang) -> Ctx {
+        Ctx { lang, user: None, path: "/".into(), query: String::new(), csrf: String::new() }
+    }
+    pub fn t(&self, key: &str) -> &'static str {
+        i18n::t(self.lang, key)
+    }
+    pub fn tf(&self, key: &str, args: &[&str]) -> String {
+        i18n::tf(self.lang, key, args)
+    }
+    pub fn int(&self, n: i64) -> String {
+        i18n::int(self.lang, n)
+    }
+    pub fn pct1(&self, v: f64) -> String {
+        i18n::pct1(self.lang, v)
+    }
+    pub fn pct(&self, v: f64) -> String {
+        i18n::pct(self.lang, v)
+    }
+    pub fn num(&self, v: f64) -> String {
+        i18n::num(self.lang, v)
+    }
+    pub fn dec(&self, v: f64, d: usize) -> String {
+        i18n::dec(self.lang, v, d)
+    }
+    /// "64 100 tkr" / "64,100 kSEK" / "64.100 mil SEK"
+    pub fn money(&self, tkr: i64) -> String {
+        format!("{} {}", self.int(tkr), self.t("unit.tkr"))
+    }
+    pub fn csrf_input(&self) -> Markup {
+        html! { input type="hidden" name="csrf" value=(self.csrf); }
+    }
+    /// Misma página con otro idioma (conserva el resto de la query).
+    pub fn url_for_lang(&self, l: Lang) -> String {
+        let rest = query_without(&self.query, "lang");
+        if rest.is_empty() { format!("{}?lang={}", self.path, l.code()) } else { format!("{}?{rest}&lang={}", self.path, l.code()) }
+    }
+}
 
 // ───────────────────────── Iconos (trazo único: 1.75, redondeado) ─────────────────────────
 
-fn icon(name: &str) -> Markup {
+pub fn icon(name: &str) -> Markup {
     icon_sized(name, "icon")
 }
 
-fn icon_sized(name: &str, class: &str) -> Markup {
+pub fn icon_sized(name: &str, class: &str) -> Markup {
     let paths = match name {
         "search" => r#"<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>"#,
         "bell" => r#"<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>"#,
@@ -36,6 +92,19 @@ fn icon_sized(name: &str, class: &str) -> Markup {
         "copy" => r#"<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>"#,
         "check" => r#"<path d="m5 12.5 4.5 4.5L19 7"/>"#,
         "info" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8v.01"/>"#,
+        "user" => r#"<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>"#,
+        "users" => r#"<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14a6.5 6.5 0 0 1 3.5 6"/>"#,
+        "shield" => r#"<path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6Z"/><path d="m9 12 2 2 4-4"/>"#,
+        "activity" => r#"<path d="M3 12h4l3-8 4 16 3-8h4"/>"#,
+        "log-out" => r#"<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>"#,
+        "globe" => r#"<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/>"#,
+        "plus" => r#"<path d="M12 5v14"/><path d="M5 12h14"/>"#,
+        "edit" => r#"<path d="M4 20h4L19 9l-4-4L4 16Z"/><path d="m14 6 4 4"/>"#,
+        "trash" => r#"<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>"#,
+        "key" => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9"/><path d="m16 7 3 3"/>"#,
+        "lock" => r#"<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#,
+        "download" => r#"<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>"#,
+        "x" => r#"<path d="M6 6l12 12"/><path d="M18 6 6 18"/>"#,
         _ => "",
     };
     html! {
@@ -46,24 +115,19 @@ fn icon_sized(name: &str, class: &str) -> Markup {
     }
 }
 
-fn sr(text: &str) -> Markup {
+pub fn sr(text: &str) -> Markup {
     html! { span.sr-only { (text) } }
 }
 
 /// Término con explicación: botón con subrayado punteado; el tooltip sale con hover, foco o toque.
-fn term(label: &str, tip: &str) -> Markup {
+pub fn term(label: &str, tip: &str) -> Markup {
     html! { button.term type="button" data-tip=(tip) { (label) } }
 }
 
 /// Botón "i" junto a un título, con zona táctil ampliada.
-fn info_btn(label: &str, tip: &str) -> Markup {
+pub fn info_btn(label: &str, tip: &str) -> Markup {
     html! { button.info type="button" data-tip=(tip) aria-label=(label) { (icon_sized("info", "icon-sm")) } }
 }
-
-const TIP_SOLIDITET: &str = "Eget kapital i procent av summa tillgångar: hur stor del av bolaget som är egenfinansierad.";
-const TIP_SOLIDITET_BENCH: &str = "Eget kapital i procent av summa tillgångar: hur stor del av bolaget som är egenfinansierad. SCB:s median räknar med justerat eget kapital.";
-const TIP_MARGIN: &str = "Resultat efter finansiella poster i procent av omsättningen. SCB:s motsvarande mått heter nettomarginal.";
-const TIP_LIQUIDITY: &str = "Omsättningstillgångar exklusive lager, i procent av kortfristiga skulder: förmågan att betala kortsiktiga skulder.";
 
 // ───────────────────────── Layout ─────────────────────────
 
@@ -75,33 +139,20 @@ struct NavItem {
     badge: Option<&'static str>,
 }
 
-struct NavGroup {
-    heading: &'static str,
-    items: &'static [NavItem],
-}
-
-const NAV: [NavGroup; 2] = [
-    NavGroup {
-        heading: "Företag",
-        items: &[
-            NavItem { href: "/sok", label: "Sök företag", short: "Sök", icon: "search", badge: None },
-            NavItem { href: "/bevakning", label: "Bevakning", short: "Bevakning", icon: "bell", badge: Some("3") },
-        ],
-    },
-    NavGroup {
-        heading: "Min verksamhet",
-        items: &[
-            NavItem { href: "/likviditet", label: "Likviditetsprognos", short: "Likviditet", icon: "trend", badge: None },
-            NavItem { href: "/sie", label: "Importera SIE", short: "SIE", icon: "upload", badge: None },
-            NavItem { href: "/fakturor", label: "Fakturor", short: "Fakturor", icon: "receipt", badge: None },
-        ],
-    },
+const NAV_COMPANIES: [NavItem; 2] = [
+    NavItem { href: "/sok", label: "nav.search", short: "nav.search.short", icon: "search", badge: None },
+    NavItem { href: "/bevakning", label: "nav.watch", short: "nav.watch.short", icon: "bell", badge: Some("3") },
 ];
+const NAV_BUSINESS: [NavItem; 3] = [
+    NavItem { href: "/likviditet", label: "nav.liquidity", short: "nav.liquidity.short", icon: "trend", badge: None },
+    NavItem { href: "/sie", label: "nav.sie", short: "nav.sie.short", icon: "upload", badge: None },
+    NavItem { href: "/fakturor", label: "nav.invoices", short: "nav.invoices.short", icon: "receipt", badge: None },
+];
+const NAV_USERS: NavItem = NavItem { href: "/users", label: "nav.users", short: "nav.users", icon: "users", badge: None };
+const NAV_ACTIVITY: NavItem = NavItem { href: "/activity", label: "nav.activity", short: "nav.activity", icon: "activity", badge: None };
 
-const DEFAULT_TITLE: &str = "Siffra — MVP";
-const DESCRIPTION: &str = "Siffra (nombre de trabajo): inteligencia financiera de empresas para el mercado sueco. Proyecto en construcción — ver README para el estado real.";
 const FONTS_URL: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap";
-const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b6e75'/%3E%3Cpath d='M21 11.5c-1-1.6-2.8-2.5-5-2.5-2.9 0-4.8 1.5-4.8 3.6 0 5 10 2.7 10 7.6 0 2.3-2.2 3.8-5.2 3.8-2.4 0-4.4-1-5.4-2.7' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E";
+const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b6e75'/%3E%3Cpath d='M21 11.5c-1-1.6-2.8-2.5-5-2.5-2.9 0-4.8 1.5-4.8 3.6 0 5 10 2.7 10 7.6 0 2.3-2.2 3.8-5.2 3.8-2.4 0-4.4-1-5.4-2.7' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E";
 
 /// Se ejecuta antes de pintar: aplica el tema guardado (sin parpadeo) y marca que hay JavaScript.
 const HEAD_SCRIPT: &str = r#"(function(){var r=document.documentElement;r.classList.add('js');try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')r.dataset.theme=t;}catch(e){}})();"#;
@@ -113,10 +164,11 @@ sync();
 b.addEventListener('click',function(){var n=cur()==='dark'?'light':'dark';r.dataset.theme=n;try{localStorage.setItem('theme',n);}catch(e){}sync();});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',sync);})();"#;
 
-/// Tooltips (`[data-tip]`), copiar al portapapeles (`[data-copy]`) y atajo "/" para ir al buscador.
-/// Un único tooltip para toda la página: se muestra con hover (si hay ratón), con foco de teclado
-/// y con toque; Escape lo cierra; se coloca dentro de la ventana y se asocia con aria-describedby.
+/// Tooltips (`[data-tip]`), copiar al portapapeles (`[data-copy]`), atajo "/" hacia el buscador, menús
+/// desplegables (se cierran al hacer clic fuera o con Escape) y horas en la zona horaria del navegador.
+/// Los textos que muestra el script vienen de atributos `data-*` del `<body>` (ya traducidos).
 const UI_SCRIPT: &str = r#"(function(){
+var body=document.body,D=function(k,f){return body.getAttribute('data-'+k)||f;};
 var tip=document.createElement('div');tip.id='tip';tip.setAttribute('role','tooltip');tip.hidden=true;document.body.appendChild(tip);
 var cur=null,canHover=matchMedia('(hover: hover)'),timer=null;
 function place(){if(!cur)return;var r=cur.getBoundingClientRect(),w=tip.offsetWidth,h=tip.offsetHeight,m=8;
@@ -126,53 +178,101 @@ function show(el){var t=el.getAttribute('data-tip');if(!t)return;if(cur&&cur!==e
 cur=el;tip.textContent=t;tip.hidden=false;el.setAttribute('aria-describedby','tip');place();}
 function hide(){if(cur){cur.removeAttribute('aria-describedby');cur=null;}tip.hidden=true;}
 function tgt(e){return e.target.closest?e.target.closest('[data-tip]'):null;}
+function closeMenus(except){document.querySelectorAll('details.menu[open]').forEach(function(d){if(d!==except)d.removeAttribute('open');});}
 document.addEventListener('mouseover',function(e){var el=tgt(e);if(el&&canHover.matches)show(el);});
 document.addEventListener('mouseout',function(e){var el=tgt(e);if(el&&(!e.relatedTarget||!el.contains(e.relatedTarget)))hide();});
 document.addEventListener('focusin',function(e){var el=tgt(e);if(el&&el.matches(':focus-visible'))show(el);});
 document.addEventListener('focusout',function(e){if(tgt(e))hide();});
 document.addEventListener('keydown',function(e){
-if(e.key==='Escape')hide();
+if(e.key==='Escape'){hide();closeMenus(null);}
 if(e.key==='/'&&!e.ctrlKey&&!e.metaKey&&!e.altKey){var q=document.getElementById('q'),a=document.activeElement;
 if(q&&a!==q&&!(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)||a&&a.isContentEditable)){e.preventDefault();q.focus();q.select();}}});
 document.addEventListener('click',function(e){
+var m=e.target.closest?e.target.closest('details.menu'):null;closeMenus(m);
 var c=e.target.closest?e.target.closest('[data-copy]'):null;
 if(c){var v=c.getAttribute('data-copy'),orig=c.getAttribute('data-tip'),live=document.getElementById('live');
-var done=function(ok){c.classList.toggle('copied',ok);c.setAttribute('data-tip',ok?'Kopierat!':'Kunde inte kopiera');if(live)live.textContent=ok?'Kopierat: '+v:'Kunde inte kopiera';show(c);
+var done=function(ok){c.classList.toggle('copied',ok);c.setAttribute('data-tip',ok?D('copied','Copied'):D('copy-failed','Could not copy'));if(live)live.textContent=ok?D('copied','Copied')+': '+v:D('copy-failed','Could not copy');show(c);
 clearTimeout(timer);timer=setTimeout(function(){c.classList.remove('copied');c.setAttribute('data-tip',orig);if(cur===c)show(c);},1800);};
 var legacy=function(){var t=document.createElement('textarea');t.value=v;t.setAttribute('readonly','');t.style.cssText='position:fixed;top:0;left:0;opacity:0';document.body.appendChild(t);t.select();var ok=false;try{ok=document.execCommand('copy');}catch(x){}document.body.removeChild(t);return ok;};
 if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(v).then(function(){done(true);},function(){done(legacy());});}else{done(legacy());}return;}
 var el=tgt(e);
 if(el&&el.tagName!=='A'&&!canHover.matches){(cur===el&&!tip.hidden)?hide():show(el);}else if(!el){hide();}});
 addEventListener('scroll',hide,true);addEventListener('resize',hide);
+document.querySelectorAll('time[datetime]').forEach(function(t){var d=new Date(t.getAttribute('datetime'));if(isNaN(d))return;
+try{t.textContent=d.toLocaleString(document.documentElement.lang||undefined,{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});t.title=t.getAttribute('datetime');}catch(e){}});
 })();"#;
 
-/// Documento completo: `<html>` + navegación + `<main>`. `pathname` decide el enlace activo.
-pub fn layout(title: &str, pathname: &str, content: Markup) -> Markup {
+fn brand_mark() -> Markup {
+    html! {
+        svg.brand-mark viewBox="0 0 32 32" aria-hidden="true" focusable="false" {
+            defs {
+                linearGradient #bm-g x1="0" y1="0" x2="1" y2="1" {
+                    stop offset="0" stop-color="#2fb3ba" {}
+                    stop offset="1" stop-color="#0b6e75" {}
+                }
+            }
+            rect width="32" height="32" rx="9" fill="url(#bm-g)" {}
+            path d="M21 11.5c-1-1.6-2.8-2.5-5-2.5-2.9 0-4.8 1.5-4.8 3.6 0 5 10 2.7 10 7.6 0 2.3-2.2 3.8-5.2 3.8-2.4 0-4.4-1-5.4-2.7"
+                fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" {}
+        }
+    }
+}
+
+pub fn brand_mark_pub() -> Markup {
+    brand_mark()
+}
+
+fn head(c: &Ctx, title: &str) -> Markup {
+    html! {
+        head {
+            meta charset="utf-8";
+            meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
+            meta name="color-scheme" content="light dark";
+            meta name="theme-color" content="#dcebee" media="(prefers-color-scheme: light)";
+            meta name="theme-color" content="#0b1a21" media="(prefers-color-scheme: dark)";
+            meta name="referrer" content="same-origin";
+            title { (title) " — Siffra" }
+            meta name="description" content=(c.t("app.description"));
+            link rel="icon" href=(FAVICON);
+            link rel="preconnect" href="https://fonts.googleapis.com";
+            link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
+            link rel="stylesheet" href=(FONTS_URL);
+            link rel="stylesheet" href=(format!("/static/styles.css?v={}", crate::handlers::css_version()));
+            script { (PreEscaped(HEAD_SCRIPT)) }
+        }
+    }
+}
+
+fn body_attrs_script(c: &Ctx) -> Markup {
+    // El script lee los textos traducidos de atributos del <body>; se fijan con un pequeño script para no
+    // tener que repetirlos en cada plantilla.
+    let js = format!(
+        "document.body.setAttribute('data-copied',{});document.body.setAttribute('data-copy-failed',{});",
+        js_string(c.t("ui.copied")),
+        js_string(c.t("ui.copy_failed"))
+    );
+    html! { script { (PreEscaped(js)) } }
+}
+
+fn js_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('<', "\\u003c").replace('\n', " "))
+}
+
+/// Documento completo con navegación. `title` ya viene traducido.
+pub fn layout(c: &Ctx, title: &str, content: Markup) -> Markup {
     html! {
         (DOCTYPE)
-        html lang="sv" {
-            head {
-                meta charset="utf-8";
-                meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover";
-                meta name="color-scheme" content="light dark";
-                meta name="theme-color" content="#e9eff1" media="(prefers-color-scheme: light)";
-                meta name="theme-color" content="#183340" media="(prefers-color-scheme: dark)";
-                title { (title) }
-                meta name="description" content=(DESCRIPTION);
-                link rel="icon" href=(FAVICON);
-                link rel="preconnect" href="https://fonts.googleapis.com";
-                link rel="preconnect" href="https://fonts.gstatic.com" crossorigin;
-                link rel="stylesheet" href=(FONTS_URL);
-                link rel="stylesheet" href="/static/styles.css";
-                script { (PreEscaped(HEAD_SCRIPT)) }
-            }
+        html lang=(c.lang.html_lang()) {
+            (head(c, title))
             body {
-                a.skip-link href="#main" { "Hoppa till innehållet" }
+                a.skip-link href="#main" { (c.t("ui.skip")) }
+                div.backdrop aria-hidden="true" { span.blob.b1 {} span.blob.b2 {} span.blob.b3 {} }
                 div.shell {
-                    (sidebar(pathname))
+                    (sidebar(c))
                     main #main.main tabindex="-1" { div.page { (content) } }
                 }
                 div #live.sr-only role="status" aria-live="polite" {}
+                (body_attrs_script(c))
                 script { (PreEscaped(THEME_SCRIPT)) }
                 script { (PreEscaped(UI_SCRIPT)) }
             }
@@ -180,41 +280,149 @@ pub fn layout(title: &str, pathname: &str, content: Markup) -> Markup {
     }
 }
 
-/// `/foretag/<org>` se considera parte de "Sök företag".
+/// Pantallas sin sesión (inicio de sesión): tarjeta centrada de vidrio sobre el fondo.
+pub fn auth_layout(c: &Ctx, title: &str, content: Markup) -> Markup {
+    html! {
+        (DOCTYPE)
+        html lang=(c.lang.html_lang()) {
+            (head(c, title))
+            body.auth-body {
+                div.backdrop aria-hidden="true" { span.blob.b1 {} span.blob.b2 {} span.blob.b3 {} }
+                main #main.auth-main tabindex="-1" {
+                    div.auth-top { (lang_menu(c)) (theme_button(c)) }
+                    (content)
+                }
+                div #live.sr-only role="status" aria-live="polite" {}
+                (body_attrs_script(c))
+                script { (PreEscaped(THEME_SCRIPT)) }
+                script { (PreEscaped(UI_SCRIPT)) }
+            }
+        }
+    }
+}
+
+fn theme_button(c: &Ctx) -> Markup {
+    html! {
+        button #theme-toggle.icon-btn type="button" aria-pressed="false" aria-label=(c.t("ui.dark_mode")) data-tip=(c.t("ui.theme_tip")) {
+            span.icon-moon { (icon("moon")) }
+            span.icon-sun { (icon("sun")) }
+        }
+    }
+}
+
+fn lang_menu(c: &Ctx) -> Markup {
+    html! {
+        details.menu.lang-menu {
+            summary.menu-btn aria-label=(c.t("ui.language")) {
+                (icon("globe")) span.menu-label { (c.lang.short()) }
+            }
+            div.menu-pop {
+                ul.menu-list {
+                    @for l in Lang::ALL {
+                        li {
+                            a.menu-item href=(c.url_for_lang(l)) lang=(l.code()) hreflang=(l.code()) aria-current=[(l == c.lang).then_some("true")] {
+                                span.menu-code { (l.short()) } (l.name())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn user_menu(c: &Ctx, user: &User) -> Markup {
+    html! {
+        details.menu.user-menu {
+            summary.menu-btn aria-label=(c.tf("ui.account_menu", &[&user.name])) {
+                span.avatar { (user.initials()) }
+                span.menu-label.user-name { (user.name) }
+            }
+            div.menu-pop {
+                div.menu-head {
+                    span.avatar.big { (user.initials()) }
+                    div.menu-who { strong { (user.name) } span.muted { (user.label()) } }
+                }
+                (role_pill(c, user.role))
+                ul.menu-list {
+                    li { a.menu-item href="/profile" { (icon_sized("user", "icon-sm")) (c.t("nav.profile")) } }
+                    @if crate::auth::can_admin_users(user) {
+                        li { a.menu-item href="/users" { (icon_sized("users", "icon-sm")) (c.t("nav.users")) } }
+                    }
+                    @if crate::auth::can_view_activity(user) {
+                        li { a.menu-item href="/activity" { (icon_sized("activity", "icon-sm")) (c.t("nav.activity")) } }
+                    }
+                    li {
+                        form method="post" action="/logout" {
+                            (c.csrf_input())
+                            button.menu-item.danger type="submit" { (icon_sized("log-out", "icon-sm")) (c.t("nav.logout")) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn role_pill(c: &Ctx, role: Role) -> Markup {
+    let class = match role {
+        Role::Superadmin => "pill pill-super",
+        Role::Admin => "pill pill-admin",
+        Role::User => "pill pill-user",
+    };
+    html! { span class=(class) { (c.t(role.label_key())) } }
+}
+
+/// `/foretag/<org>` se considera parte de "Buscar empresas".
 fn nav_active(pathname: &str, href: &str) -> bool {
     pathname == href
         || pathname.starts_with(&format!("{href}/"))
         || (href == "/sok" && pathname.starts_with("/foretag"))
 }
 
-fn sidebar(pathname: &str) -> Markup {
+fn nav_link(c: &Ctx, item: &NavItem) -> Markup {
+    let active = nav_active(&c.path, item.href);
+    html! {
+        a.nav-link href=(item.href) aria-current=[active.then_some("page")] {
+            (icon(item.icon))
+            span.nav-text {
+                span.label-long { (c.t(item.label)) }
+                span.label-short { (c.t(item.short)) }
+                @if let Some(badge) = item.badge {
+                    span.nav-badge { (badge) (sr(c.t("nav.new"))) }
+                }
+            }
+        }
+    }
+}
+
+fn sidebar(c: &Ctx) -> Markup {
+    let admin = c.user.as_ref().is_some_and(crate::auth::can_admin_users);
+    let super_ = c.user.as_ref().is_some_and(crate::auth::can_view_activity);
     html! {
         aside.sidebar {
             div.side-head {
-                a.brand href="/sok" aria-label="Siffra, till sökningen" { "Sif" span.accent { "f" } "ra" }
-                button #theme-toggle.icon-btn type="button" aria-pressed="false" aria-label="Mörkt läge"
-                    data-tip="Växla mellan ljust och mörkt läge" {
-                    span.icon-moon { (icon("moon")) }
-                    span.icon-sun { (icon("sun")) }
+                a.brand href="/sok" aria-label=(c.t("ui.brand_label")) { (brand_mark()) span.brand-word { "Sif" span.accent { "f" } "ra" } }
+                div.side-actions {
+                    (lang_menu(c))
+                    (theme_button(c))
+                    @if let Some(u) = &c.user { (user_menu(c, u)) }
                 }
             }
-            nav.side-nav aria-label="Huvudmeny" {
-                @for group in NAV.iter() {
-                    div.nav-group {
-                        div.nav-heading { (group.heading) }
-                        @for item in group.items.iter() {
-                            @let active = nav_active(pathname, item.href);
-                            a.nav-link href=(item.href) aria-current=[active.then_some("page")] {
-                                (icon(item.icon))
-                                span.nav-text {
-                                    span.label-long { (item.label) }
-                                    span.label-short { (item.short) }
-                                    @if let Some(badge) = item.badge {
-                                        span.nav-badge { (badge) (sr(" nya")) }
-                                    }
-                                }
-                            }
-                        }
+            nav.side-nav aria-label=(c.t("ui.main_menu")) {
+                div.nav-group {
+                    div.nav-heading { (c.t("nav.group.companies")) }
+                    @for item in NAV_COMPANIES.iter() { (nav_link(c, item)) }
+                }
+                div.nav-group {
+                    div.nav-heading { (c.t("nav.group.business")) }
+                    @for item in NAV_BUSINESS.iter() { (nav_link(c, item)) }
+                }
+                @if admin {
+                    div.nav-group.nav-admin {
+                        div.nav-heading { (c.t("nav.group.admin")) }
+                        (nav_link(c, &NAV_USERS))
+                        @if super_ { (nav_link(c, &NAV_ACTIVITY)) }
                     }
                 }
             }
@@ -232,17 +440,17 @@ fn sev_class(s: Severity) -> &'static str {
     }
 }
 
-fn example_badge() -> Markup {
-    html! { span.example-badge lang="es" data-tip="Fiktiva exempeldata, inte riktiga uppgifter." { "EJEMPLO" } }
+pub fn example_badge(c: &Ctx) -> Markup {
+    html! { span.example-badge data-tip=(c.t("common.example_tip")) { (c.t("common.example")) } }
 }
 
-fn risk_pill(level: RiskLevel) -> Markup {
-    let label = match level {
-        Severity::Good => "Låg risk",
-        Severity::Warn => "Bevaka",
-        Severity::Bad => "Förhöjd risk",
+fn risk_pill(c: &Ctx, level: RiskLevel) -> Markup {
+    let key = match level {
+        Severity::Good => "risk.low",
+        Severity::Warn => "risk.watch",
+        Severity::Bad => "risk.high",
     };
-    html! { span class={"pill pill-" (sev_class(level))} { span.pill-dot aria-hidden="true" {} (label) } }
+    html! { span class={"pill pill-" (sev_class(level))} { span.pill-dot aria-hidden="true" {} (c.t(key)) } }
 }
 
 fn status_pill(text: &str) -> Markup {
@@ -250,45 +458,43 @@ fn status_pill(text: &str) -> Markup {
 }
 
 /// Una señal con icono propio por gravedad y texto para lectores de pantalla (no depende solo del color).
-fn alert_row(severity: Severity, body: Markup) -> Markup {
-    let (icon_name, label) = match severity {
-        Severity::Good => ("check-circle", "Positiv signal: "),
-        Severity::Warn => ("triangle-alert", "Varning: "),
-        Severity::Bad => ("octagon-alert", "Allvarlig varning: "),
+fn alert_row(c: &Ctx, severity: Severity, body: Markup) -> Markup {
+    let (icon_name, label_key) = match severity {
+        Severity::Good => ("check-circle", "sev.good"),
+        Severity::Warn => ("triangle-alert", "sev.warn"),
+        Severity::Bad => ("octagon-alert", "sev.bad"),
     };
     html! {
         li {
             span class={"alert-icon sev-" (sev_class(severity))} { (icon_sized(icon_name, "icon")) }
-            span { (sr(label)) (body) }
+            span { (sr(c.t(label_key))) (body) }
         }
     }
 }
 
-/// `"1 234,5"`-estilo tkr → mkr con un decimal, para las etiquetas de las barras.
-fn mkr(v: f64) -> String {
-    format!("{:.1}", v / 1000.0)
+/// Millones de coronas con un decimal, para las etiquetas de las barras.
+fn mkr(c: &Ctx, tkr: f64) -> String {
+    c.dec(tkr / 1000.0, 1)
 }
 
-fn benchmark_row(label: &str, term_tip: &str, pair: BenchmarkPair, scale_max: f64) -> Markup {
-    let unit = "%";
+fn benchmark_row(c: &Ctx, label_key: &str, tip_key: &str, pair: BenchmarkPair, scale_max: f64) -> Markup {
+    let label = c.t(label_key);
     let value_pct = (pair.value / scale_max * 100.0).clamp(0.0, 100.0);
     let median_pct = (pair.median / scale_max * 100.0).clamp(0.0, 100.0);
-    let aria = format!("{label}: företaget {} {unit}, branschmedian {} {unit}", pair.value, pair.median);
+    let (v, m) = (c.pct(pair.value), c.pct(pair.median));
+    let aria = c.tf("bench.aria", &[label, &v, &m]);
     let diff = pair.value - pair.median;
-    let tip = format!(
-        "{label}: företaget {} {unit}, branschmedian {} {unit}. {} medianen med {:.1} procentenheter.",
-        pair.value,
-        pair.median,
-        if diff >= 0.0 { "Över" } else { "Under" },
-        diff.abs()
+    let tip = c.tf(
+        "bench.tip",
+        &[label, &v, &m, c.t(if diff >= 0.0 { "bench.above" } else { "bench.below" }), &c.dec(diff.abs(), 1)],
     );
     html! {
         div.bench {
             div.bench-top {
-                span.bench-label { (term(label, term_tip)) }
+                span.bench-label { (term(label, c.t(tip_key))) }
                 span.bench-val {
-                    span.neg[pair.value < 0.0] { (pair.value) " " (unit) }
-                    span.bench-median-text { " · median " (pair.median) " " (unit) }
+                    span.neg[pair.value < 0.0] { (v) }
+                    span.bench-median-text { (c.tf("bench.median_text", &[&m])) }
                 }
             }
             div.bench-track role="img" tabindex="0" aria-label=(aria) data-tip=(tip) {
@@ -299,54 +505,43 @@ fn benchmark_row(label: &str, term_tip: &str, pair: BenchmarkPair, scale_max: f6
     }
 }
 
-fn bench_legend() -> Markup {
+fn bench_legend(c: &Ctx) -> Markup {
     html! {
         div.legend aria-hidden="true" {
-            span.legend-item { span.swatch.fill {} "Företaget" }
-            span.legend-item { span.swatch.marker {} "Branschmedian" }
+            span.legend-item { span.swatch.fill {} (c.t("bench.legend.company")) }
+            span.legend-item { span.swatch.marker {} (c.t("bench.legend.median")) }
         }
     }
 }
 
 /// Barras de comparación + leyenda + nota de fuente. Se sirve en la ficha o como fragmento diferido.
 /// El valor de la empresa es de EJEMPLO; la mediana es real si SCB respondió.
-pub fn benchmark_fragment(company: &Company, medians: Option<&SectorMedians>, notice: Option<&str>) -> Markup {
-    let sni_code: String = company.sni.chars().take(6).collect();
+pub fn benchmark_fragment(c: &Ctx, company: &Company, medians: Option<&SectorMedians>, notice: Option<&str>) -> Markup {
     let b = &company.benchmarks;
-    let with_median = |pair: BenchmarkPair, real: Option<f64>| BenchmarkPair {
-        median: real.unwrap_or(pair.median),
-        ..pair
-    };
+    let with_median = |pair: BenchmarkPair, real: Option<f64>| BenchmarkPair { median: real.unwrap_or(pair.median), ..pair };
     let margin = with_median(b.margin, medians.map(|m| m.margin));
     let solidity = with_median(b.solidity, medians.map(|m| m.solidity));
     let liquidity = with_median(b.liquidity, medians.map(|m| m.liquidity));
     html! {
-        (benchmark_row("Vinstmarginal", TIP_MARGIN, margin, 30.0))
-        (benchmark_row("Soliditet", TIP_SOLIDITET_BENCH, solidity, 80.0))
-        (benchmark_row("Kassalikviditet", TIP_LIQUIDITY, liquidity, 250.0))
-        (bench_legend())
+        (benchmark_row(c, "term.margin", "tip.margin", margin, 30.0))
+        (benchmark_row(c, "term.solidity", "tip.solidity.bench", solidity, 80.0))
+        (benchmark_row(c, "term.liquidity", "tip.liquidity", liquidity, 250.0))
+        (bench_legend(c))
         @if let Some(n) = notice {
             p.notice role="status" { (n) }
         }
         @if let Some(m) = medians {
+            @let label = if m.sni_label.is_empty() { String::new() } else { format!(" ({})", m.sni_label) };
+            @let size = if m.size_class == "TOT" { c.t("bench.all_sizes").to_string() } else { c.tf("bench.size", &[&m.size_class.replace("001", "0")]) };
             p.note {
-                "Strecket visar medianen för SNI " (m.sni_code)
-                @if !m.sni_label.is_empty() { " (" (m.sni_label) ")" }
-                ", "
-                @if m.size_class == "TOT" {
-                    "alla storleksklasser"
-                } @else {
-                    (m.size_class.replace("001", "0")) " anställda"
-                }
-                ", " (m.year) ". Källa: SCB, branschnyckeltal."
+                (c.tf("bench.note.real", &[m.sni_code.as_str(), &label, &size, m.year.as_str()]))
                 @if !m.exact_sni || !m.exact_size {
-                    " SCB saknar data för " (sni_code) ", " (company.employee_range)
-                    " anställda — närmaste nivå visas."
+                    " " (c.tf("bench.note.fallback", &[company.sni_code, company.employee_range]))
                 }
-                " Företagets egna värden är " (example_badge()) "."
+                " " (c.t("bench.note.own")) " " (example_badge(c)) "."
             }
         } @else {
-            p.note { "Strecket visar medianen för SNI " (sni_code) ". " (example_badge()) }
+            p.note { (c.tf("bench.note.example", &[company.sni_code])) " " (example_badge(c)) }
         }
     }
 }
@@ -361,45 +556,40 @@ fn nice_step(x: f64) -> f64 {
 }
 
 /// Gráfico de barras SVG de la omsättning de 5 años (datos de ejemplo).
-fn revenue_chart(revenue: &FiveYearSeries) -> Markup {
-    bar_chart(&FINANCIAL_YEARS, revenue)
+fn revenue_chart(c: &Ctx, revenue: &FiveYearSeries) -> Markup {
+    bar_chart(c, &FINANCIAL_YEARS, revenue)
 }
 
-/// Gráfico de barras SVG de la omsättning con etiqueta de valor en cada barra, tooltips y eje adaptable
-/// (millones de coronas: mkr; cifras pequeñas: tkr). `labels` y `values` tienen la misma longitud.
-fn bar_chart(labels: &[&str], values: &[i64]) -> Markup {
+/// Gráfico de barras SVG de la facturación con etiqueta de valor en cada barra, tooltips y eje adaptable
+/// (millones: mkr; cifras pequeñas: tkr). `labels` y `values` tienen la misma longitud.
+fn bar_chart(c: &Ctx, labels: &[&str], values: &[i64]) -> Markup {
     let n = values.len().min(labels.len());
     if n == 0 {
         return html! {};
     }
     let (labels, values) = (&labels[..n], &values[..n]);
     let (w, h) = (360.0_f64, 230.0_f64);
-    let (pl, pb, pt, pr) = (50.0_f64, 28.0_f64, 22.0_f64, 6.0_f64);
+    let (pl, pb, pt, pr) = (58.0_f64, 28.0_f64, 22.0_f64, 6.0_f64);
     let max = values.iter().copied().max().unwrap_or(0).max(0) as f64;
     let top = 4.0 * nice_step((max / 4.0).max(1.0));
     let in_mkr = top >= 5000.0;
-    let axis_label = |v: f64| if in_mkr { format!("{} mkr", v / 1000.0) } else { format!("{} tkr", v) };
-    let bar_label = |v: i64| if in_mkr { mkr(v as f64) } else { format_tkr(v) };
+    let (unit_tkr, unit_mkr) = (c.t("unit.tkr"), c.t("unit.mkr"));
+    let axis_label = |v: f64| if in_mkr { format!("{} {unit_mkr}", c.num(v / 1000.0)) } else { format!("{} {unit_tkr}", c.num(v)) };
+    let bar_label = |v: i64| if in_mkr { mkr(c, v as f64) } else { c.int(v) };
     let bw = (w - pl - pr) / n as f64;
 
     let grid_lines: Vec<(f64, f64)> = (0..5)
         .map(|i| {
             let value = top / 4.0 * i as f64;
-            let y = h - pb - (h - pb - pt) * value / top;
-            (value, y)
+            (value, h - pb - (h - pb - pt) * value / top)
         })
         .collect();
-
-    let desc = labels
-        .iter()
-        .zip(values)
-        .map(|(l, v)| format!("{l}: {} tkr", format_tkr(*v)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let title = c.tf("chart.rev.title", &[unit_tkr]);
+    let desc = labels.iter().zip(values).map(|(l, v)| format!("{l}: {} {unit_tkr}", c.int(*v))).collect::<Vec<_>>().join(", ");
 
     html! {
         svg.chart viewBox=(format!("0 0 {} {}", w, h)) role="group" aria-labelledby="rc-title rc-desc" {
-            title #rc-title { "Omsättning per år (tkr)" }
+            title #rc-title { (title) }
             desc #rc-desc { (desc) }
             @for (value, y) in grid_lines.iter() {
                 g {
@@ -416,20 +606,23 @@ fn bar_chart(labels: &[&str], values: &[i64]) -> Markup {
                 @let y = h - pb - bar_h;
                 @let is_last = i == n - 1;
                 @let tip = if i > 0 && values[i - 1] > 0 {
-                    let c = (v as f64 / values[i - 1] as f64 - 1.0) * 100.0;
-                    format!("{}: {} tkr · {}{:.1} % mot {}", labels[i], format_tkr(v),
-                        if c >= 0.0 { "+" } else { "−" }, c.abs(), labels[i - 1])
+                    let ch = (v as f64 / values[i - 1] as f64 - 1.0) * 100.0;
+                    c.tf("chart.rev.tip_change", &[labels[i], &c.int(v), unit_tkr, if ch >= 0.0 { "+" } else { "−" }, &c.dec(ch.abs(), 1), labels[i - 1]])
                 } else {
-                    format!("{}: {} tkr", labels[i], format_tkr(v))
+                    c.tf("chart.rev.tip", &[labels[i], &c.int(v), unit_tkr])
                 };
                 g.bar-group tabindex="0" role="img" aria-label=(tip) data-tip=(tip) {
                     rect.hit x=(pl + i as f64 * bw) y=(pt) width=(bw) height=(h - pb - pt) fill="transparent" {}
-                    rect.bar x=(x) y=(y) width=(bar_w) height=(bar_h) rx="2"
-                        fill=(if is_last { "var(--bar)" } else { "var(--bar2)" }) {}
+                    rect.bar x=(x) y=(y) width=(bar_w) height=(bar_h) rx="3"
+                        fill=(if is_last { "url(#bar-grad)" } else { "var(--bar2)" }) {}
                     text x=(x + bar_w / 2.0) y=(h - 9.0) text-anchor="middle" { (labels[i]) }
-                    text.value-label.strong[is_last] x=(x + bar_w / 2.0) y=(y - 6.0) text-anchor="middle" {
-                        (bar_label(v))
-                    }
+                    text.value-label.strong[is_last] x=(x + bar_w / 2.0) y=(y - 6.0) text-anchor="middle" { (bar_label(v)) }
+                }
+            }
+            defs {
+                linearGradient #bar-grad x1="0" y1="0" x2="0" y2="1" {
+                    stop offset="0" stop-color="var(--bar-top)" {}
+                    stop offset="1" stop-color="var(--bar)" {}
                 }
             }
         }
@@ -437,8 +630,9 @@ fn bar_chart(labels: &[&str], values: &[i64]) -> Markup {
 }
 
 /// Gráfico de barras SVG de la caja proyectada, a partir del saldo inicial y las entradas/salidas semanales.
-fn cash_flow_chart(weeks: &[CashWeek], start_balance: i64) -> Markup {
+fn cash_flow_chart(c: &Ctx, weeks: &[CashWeek], start_balance: i64) -> Markup {
     const THRESHOLD: i64 = 150; // por debajo de este saldo la barra se marca como riesgo
+    let unit = c.t("unit.tkr");
     let mut balance = start_balance;
     let points: Vec<i64> = weeks
         .iter()
@@ -451,7 +645,7 @@ fn cash_flow_chart(weeks: &[CashWeek], start_balance: i64) -> Markup {
     let max = *points.iter().max().unwrap_or(&0);
 
     let (w, h) = (520.0_f64, 240.0_f64);
-    let (pl, pb, pt) = (48.0_f64, 28.0_f64, 26.0_f64);
+    let (pl, pb, pt) = (52.0_f64, 28.0_f64, 26.0_f64);
     let lo = (min.min(0)) as f64;
     let hi = (max as f64 / 100.0).ceil() * 100.0;
     let bw = (w - pl - 8.0) / weeks.len() as f64;
@@ -459,30 +653,31 @@ fn cash_flow_chart(weeks: &[CashWeek], start_balance: i64) -> Markup {
     let y = |v: f64| h - pb - (h - pb - pt) * (v - lo) / (hi - lo);
     let grid_values = [lo, js_round((lo + hi) / 2.0 / 100.0) * 100.0, hi];
     let lowest_idx = points.iter().position(|&p| p == min).unwrap_or(0);
-    let desc = weeks
-        .iter()
-        .zip(&points)
-        .map(|(wk, p)| format!("vecka {}: {} tkr", wk.week, p))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let week_label = |n: u32| c.tf("chart.week_short", &[&n.to_string()]);
+    let desc = weeks.iter().zip(&points).map(|(wk, p)| format!("{}: {} {unit}", c.tf("chart.week_n", &[&wk.week.to_string()]), c.int(*p))).collect::<Vec<_>>().join(", ");
+    let threshold_text = c.tf("chart.cash.limit_label", &[&THRESHOLD.to_string()]);
 
     html! {
         figure {
             div.chart-scroll {
                 svg.chart viewBox=(format!("0 0 {} {}", w, h)) role="group" aria-labelledby="cc-title cc-desc" {
-                    title #cc-title { "Prognos för kassa, 13 veckor (tkr)" }
-                    desc #cc-desc { "Förväntad kassa per vecka. " (desc) }
+                    title #cc-title { (c.tf("chart.cash.title", &[unit])) }
+                    desc #cc-desc { (c.t("chart.cash.desc")) " " (desc) }
                     defs {
                         pattern #hatch width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)" {
                             rect width="6" height="6" fill="var(--bad)" {}
                             rect width="2" height="6" fill="var(--surface)" {}
                         }
+                        linearGradient #bar-grad2 x1="0" y1="0" x2="0" y2="1" {
+                            stop offset="0" stop-color="var(--bar-top)" {}
+                            stop offset="1" stop-color="var(--bar)" {}
+                        }
                     }
-                    text x="0" y="12" { "tkr" }
+                    text x="0" y="12" { (unit) }
                     @for v in grid_values.iter() {
                         g {
                             line x1=(pl) x2=(w - 8.0) y1=(y(*v)) y2=(y(*v)) stroke="var(--line)" {}
-                            text x=(pl - 8.0) y=(y(*v) + 4.0) text-anchor="end" { (v) }
+                            text x=(pl - 8.0) y=(y(*v) + 4.0) text-anchor="end" { (c.num(*v)) }
                         }
                     }
                     @for (i, v) in points.iter().enumerate() {
@@ -492,51 +687,55 @@ fn cash_flow_chart(weeks: &[CashWeek], start_balance: i64) -> Markup {
                         @let y0 = y(0.0);
                         @let y1 = y(v as f64);
                         @let net = weeks[i].inflow - weeks[i].outflow;
-                        @let tip = format!("Vecka {}: kassa {} tkr · in {} · ut {} · netto {}{}",
-                            weeks[i].week, v, weeks[i].inflow, weeks[i].outflow, format_tkr(net),
-                            if v < THRESHOLD { " · under gränsen" } else { "" });
+                        @let tip = c.tf("chart.cash.bar_tip", &[&weeks[i].week.to_string(), &c.int(v), &c.int(weeks[i].inflow), &c.int(weeks[i].outflow), &c.int(net), unit])
+                            + if v < THRESHOLD { c.t("chart.cash.below_suffix") } else { "" };
                         g.bar-group tabindex="0" role="img" aria-label=(tip) data-tip=(tip) {
                             rect.hit x=(pl + i as f64 * bw) y=(pt) width=(bw) height=(h - pb - pt) fill="transparent" {}
-                            rect.bar x=(x) y=(y0.min(y1)) width=(bar_w) height=((y1 - y0).abs()) rx="2"
-                                fill=(if v < THRESHOLD { "url(#hatch)" } else { "var(--bar)" })
+                            rect.bar x=(x) y=(y0.min(y1)) width=(bar_w) height=((y1 - y0).abs()) rx="3"
+                                fill=(if v < THRESHOLD { "url(#hatch)" } else { "url(#bar-grad2)" })
                                 stroke=(if v < THRESHOLD { "var(--bad)" } else { "none" }) {}
-                            text x=(x + bar_w / 2.0) y=(h - 9.0) text-anchor="middle" { "v" (weeks[i].week) }
+                            text x=(x + bar_w / 2.0) y=(h - 9.0) text-anchor="middle" { (week_label(weeks[i].week)) }
                             @if i == lowest_idx {
-                                text.value-label.strong x=(x + bar_w / 2.0) y=(y1 - 6.0) text-anchor="middle" { (v) }
+                                text.value-label.strong x=(x + bar_w / 2.0) y=(y1 - 6.0) text-anchor="middle" { (c.int(v)) }
                             }
                         }
                     }
-                    g.threshold-group tabindex="0" role="img" aria-label="Gräns 150 tkr: staplar under gränsen markeras"
-                        data-tip="Gräns 150 tkr: staplar med lägre kassa markeras som risk (exempelvärde)." {
-                        rect x=(w - 96.0) y=(y(THRESHOLD as f64) - 20.0) width="88" height="20" fill="transparent" {}
+                    g.threshold-group tabindex="0" role="img" aria-label=(c.tf("chart.cash.limit_aria", &[&THRESHOLD.to_string(), unit]))
+                        data-tip=(c.tf("chart.cash.limit_tip", &[&THRESHOLD.to_string(), unit])) {
+                        rect x=(w - 110.0) y=(y(THRESHOLD as f64) - 20.0) width="102" height="20" fill="transparent" {}
                         line.threshold x1=(pl) x2=(w - 8.0) y1=(y(THRESHOLD as f64)) y2=(y(THRESHOLD as f64)) {}
-                        text.threshold-label x=(w - 10.0) y=(y(THRESHOLD as f64) - 5.0) text-anchor="end" { "gräns " (THRESHOLD) }
+                        text.threshold-label x=(w - 10.0) y=(y(THRESHOLD as f64) - 5.0) text-anchor="end" { (threshold_text) }
                     }
                 }
             }
-            p.scroll-hint { "Svep i sidled för att se alla veckor." }
+            p.scroll-hint { (c.t("chart.scroll_hint")) }
             div.legend {
-                span.legend-item { span.swatch.fill {} "Kassa" }
-                span.legend-item { span.swatch.hatch {} "Under gränsen" }
-                span.legend-item { span.swatch.dash {} "Gräns " (THRESHOLD) " tkr" }
+                span.legend-item { span.swatch.fill {} (c.t("chart.cash.legend.cash")) }
+                span.legend-item { span.swatch.hatch {} (c.t("chart.cash.legend.below")) }
+                span.legend-item { span.swatch.dash {} (c.tf("chart.cash.limit_legend", &[&THRESHOLD.to_string(), unit])) }
             }
             figcaption.chart-caption {
-                "Kassan kommer nära " strong { (min) " tkr" } " i vecka " (weeks[lowest_idx].week) "."
+                (c.t("chart.cash.caption_a")) " " strong { (c.int(min)) " " (unit) } " " (c.tf("chart.cash.caption_b", &[&weeks[lowest_idx].week.to_string()]))
             }
         }
         details.chart-data {
-            summary { "Visa värden som tabell" }
+            summary { (c.t("chart.show_table")) }
             div.table-wrap {
                 table {
-                    caption.sr-only { "Förväntad kassa per vecka, tkr" }
-                    thead { tr { th scope="col" { "Vecka" } th.right scope="col" { "In" } th.right scope="col" { "Ut" } th.right scope="col" { "Kassa" } } }
+                    caption.sr-only { (c.tf("chart.cash.table_caption", &[unit])) }
+                    thead { tr {
+                        th scope="col" { (c.t("chart.cash.col.week")) }
+                        th.right scope="col" { (c.t("chart.cash.col.in")) }
+                        th.right scope="col" { (c.t("chart.cash.col.out")) }
+                        th.right scope="col" { (c.t("chart.cash.col.cash")) }
+                    } }
                     tbody {
                         @for (wk, p) in weeks.iter().zip(&points) {
                             tr {
                                 th scope="row" { (wk.week) }
-                                td.right.num { (wk.inflow) }
-                                td.right.num { (wk.outflow) }
-                                td.right.num { (p) }
+                                td.right.num { (c.int(wk.inflow)) }
+                                td.right.num { (c.int(wk.outflow)) }
+                                td.right.num { (c.int(*p)) }
                             }
                         }
                     }
@@ -546,18 +745,7 @@ fn cash_flow_chart(weeks: &[CashWeek], start_balance: i64) -> Markup {
     }
 }
 
-// ───────────────────────── Páginas ─────────────────────────
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+// ───────────────────────── Búsqueda ─────────────────────────
 
 fn sok_url(q: &str, sort: Option<(&str, &str)>) -> String {
     let mut url = String::from("/sok");
@@ -577,7 +765,8 @@ fn default_dir(col: &str) -> &'static str {
     if col == "name" { "asc" } else { "desc" }
 }
 
-fn sortable_th(label: &str, col: &str, q: &str, sort: Option<&str>, dir: &str, right: bool, hide_sm: bool) -> Markup {
+#[allow(clippy::too_many_arguments)]
+fn sortable_th(c: &Ctx, label: &str, col: &str, q: &str, sort: Option<&str>, dir: &str, right: bool, hide_sm: bool) -> Markup {
     let current = (sort == Some(col)).then_some(dir);
     let next = match current {
         Some("asc") => "desc",
@@ -594,12 +783,12 @@ fn sortable_th(label: &str, col: &str, q: &str, sort: Option<&str>, dir: &str, r
         Some(_) => "chevron-down",
         None => "chevrons",
     };
-    let what = match col {
-        "name" => "företag",
-        "revenue" => "omsättning",
-        _ => "resultat",
-    };
-    let tip = format!("Sortera {} efter {what}", if next == "asc" { "stigande" } else { "fallande" });
+    let what = c.t(match col {
+        "name" => "sok.sort.company",
+        "revenue" => "sok.sort.revenue",
+        _ => "sok.sort.result",
+    });
+    let tip = c.tf("sok.sort.tip", &[c.t(if next == "asc" { "sok.sort.asc" } else { "sok.sort.desc" }), what]);
     html! {
         th.right[right].hide-sm[hide_sm] scope="col" aria-sort=[aria_sort] {
             a.sort-link href=(sok_url(q, Some((col, next)))) data-tip=(tip) {
@@ -609,7 +798,11 @@ fn sortable_th(label: &str, col: &str, q: &str, sort: Option<&str>, dir: &str, r
     }
 }
 
-pub fn sok_page(query: &str, sort: Option<&str>, dir: Option<&str>, live: Option<&Organisation>) -> Markup {
+const SEARCH_SCRIPT: &str = r#"(function(){var i=document.getElementById('q');if(!i)return;
+if(i.value&&location.search.indexOf('q=')>-1&&!document.querySelector('[aria-sort]')){i.focus();var n=i.value.length;try{i.setSelectionRange(n,n);}catch(e){}}
+var t;i.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){i.form.submit();},350);});})();"#;
+
+pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, live: Option<&Organisation>) -> Markup {
     let mut results = search_example_companies(query);
     let live = live.filter(|_| results.is_empty());
     let sort = sort.filter(|s| ["name", "revenue", "result"].contains(s));
@@ -619,9 +812,9 @@ pub fn sok_page(query: &str, sort: Option<&str>, dir: Option<&str>, live: Option
         _ => sort.map(default_dir).unwrap_or("asc"),
     };
     match sort {
-        Some("name") => results.sort_by_key(|c| c.name.to_lowercase()),
-        Some("revenue") => results.sort_by_key(|c| c.financials.revenue[4]),
-        Some("result") => results.sort_by_key(|c| c.financials.result[4]),
+        Some("name") => results.sort_by_key(|co| co.name.to_lowercase()),
+        Some("revenue") => results.sort_by_key(|co| co.financials.revenue[4]),
+        Some("result") => results.sort_by_key(|co| co.financials.result[4]),
         _ => {}
     }
     if sort.is_some() && dir == "desc" {
@@ -630,62 +823,60 @@ pub fn sok_page(query: &str, sort: Option<&str>, dir: Option<&str>, live: Option
 
     let total = results.len() + usize::from(live.is_some());
     let count_text = if query.trim().is_empty() {
-        format!("{total} företag")
+        c.tf(if total == 1 { "sok.count.one_company" } else { "sok.count.companies" }, &[&total.to_string()])
     } else {
-        format!("{total} {} för ”{}”", if total == 1 { "träff" } else { "träffar" }, query.trim())
+        c.tf(if total == 1 { "sok.count.hit" } else { "sok.count.hits" }, &[&total.to_string(), query.trim()])
     };
+    let unit = c.t("unit.tkr");
 
     layout(
-        "Sök företag — Siffra",
-        "/sok",
+        c,
+        c.t("nav.search"),
         html! {
             div.page-head {
-                h1.page-title { "Sök företag" }
-                p.lead lang="es" {
-                    "Interfaz de producto en sueco. Estas tres empresas son un " strong { "EJEMPLO" }
-                    " ficticio; en producción esta lista vendrá de SCB y Bolagsverket."
-                }
+                h1.page-title { (c.t("nav.search")) }
+                p.lead { (c.t("sok.lead")) " " strong { (c.t("common.example_upper")) } " " (c.t("sok.lead_b")) }
             }
             form.search role="search" method="get" action="/sok" {
-                label.field-label for="q" { "Namn, organisationsnummer eller ort" }
+                label.field-label for="q" { (c.t("sok.label")) }
                 div.search-row {
                     div.search-field {
                         (icon("search"))
                         input #q.search-input type="search" name="q" value=(query)
-                            placeholder="t.ex. Nordlys, 559012-3456 eller Göteborg"
+                            placeholder=(c.t("sok.placeholder"))
                             autocomplete="off" enterkeyhint="search";
                     }
-                    button.btn.btn-primary type="submit" { "Sök" }
+                    button.btn.btn-primary type="submit" { (c.t("sok.submit")) }
                     @if !query.is_empty() {
-                        a.btn href="/sok" { "Rensa" }
+                        a.btn href="/sok" { (c.t("sok.clear")) }
                     }
                 }
-                p.field-hint.js-only { "Tryck " kbd { "/" } " för att hoppa till sökfältet." }
+                p.field-hint.js-only { (c.t("sok.hint_a")) " " kbd { "/" } " " (c.t("sok.hint_b")) }
             }
             p.result-count role="status" { (count_text) }
             div.table-wrap {
                 table.row-link {
-                    caption.sr-only { "Företag" }
+                    caption.sr-only { (c.t("sok.caption")) }
                     thead {
                         tr {
-                            (sortable_th("Företag", "name", query, sort, dir, false, false))
-                            th.hide-sm scope="col" { "Ort" }
-                            (sortable_th("Omsättning 2024 (tkr)", "revenue", query, sort, dir, true, false))
-                            (sortable_th("Resultat (tkr)", "result", query, sort, dir, true, true))
-                            th scope="col" { "Risk" }
+                            (sortable_th(c, c.t("sok.col.company"), "name", query, sort, dir, false, false))
+                            th.hide-sm scope="col" { (c.t("sok.col.city")) }
+                            (sortable_th(c, &c.tf("sok.col.revenue", &[unit]), "revenue", query, sort, dir, true, false))
+                            (sortable_th(c, &c.tf("sok.col.result", &[unit]), "result", query, sort, dir, true, true))
+                            th scope="col" { (c.t("sok.col.risk")) }
                         }
                     }
                     tbody {
-                        @for c in results.iter() {
+                        @for co in results.iter() {
                             tr {
                                 td.top {
-                                    a.company-link href=(format!("/foretag/{}", c.org_number)) { (c.name) }
-                                    div.org-sub { (c.org_number) span.city-sub { (c.city) } }
+                                    a.company-link href=(format!("/foretag/{}", co.org_number)) { (co.name) }
+                                    div.org-sub { (co.org_number) span.city-sub { (co.city) } }
                                 }
-                                td.top.hide-sm { (c.city) }
-                                td.top.right.num.mono { (format_tkr(c.financials.revenue[4])) }
-                                td.top.right.num.mono.hide-sm.neg[c.financials.result[4] < 0] { (format_tkr(c.financials.result[4])) }
-                                td.top { (risk_pill(c.risk_level)) }
+                                td.top.hide-sm { (co.city) }
+                                td.top.right.num.mono { (c.int(co.financials.revenue[4])) }
+                                td.top.right.num.mono.hide-sm.neg[co.financials.result[4] < 0] { (c.int(co.financials.result[4])) }
+                                td.top { (risk_pill(c, co.risk_level)) }
                             }
                         }
                         @if let Some(o) = live {
@@ -704,13 +895,13 @@ pub fn sok_page(query: &str, sort: Option<&str>, dir: Option<&str>, live: Option
                             tr {
                                 td colspan="5" {
                                     div.empty-state {
-                                        strong { "Inga träffar" }
-                                        p { "Prova ett annat namn eller organisationsnummer, eller sök på en ort." }
+                                        strong { (c.t("sok.empty.title")) }
+                                        p { (c.t("sok.empty.text")) }
                                         div.chips {
                                             a.chip href=(sok_url("Göteborg", None)) { "Göteborg" }
                                             a.chip href=(sok_url("Uppsala", None)) { "Uppsala" }
                                             a.chip href=(sok_url("559108-7721", None)) { "559108-7721" }
-                                            a.chip href="/sok" { "Visa alla" }
+                                            a.chip href="/sok" { (c.t("sok.empty.all")) }
                                         }
                                     }
                                 }
@@ -720,19 +911,17 @@ pub fn sok_page(query: &str, sort: Option<&str>, dir: Option<&str>, live: Option
                 }
             }
             @if live.is_some() {
-                p.note { "Resultat från Bolagsverket (gratis API, sökning på organisationsnummer)." }
+                p.note { (c.t("sok.note.live")) }
             } @else {
-                p.note lang="es" { (example_badge()) " Tres empresas ficticias. En producción esta lista viene de SCB y Bolagsverket." }
+                p.note { (example_badge(c)) " " (c.t("sok.note.example")) }
             }
-            // Filtrado "en vivo" como el original: reenvía el formulario al escribir (con retardo).
+            // Filtrado "en vivo": reenvía el formulario al escribir (con retardo).
             script { (PreEscaped(SEARCH_SCRIPT)) }
         },
     )
 }
 
-const SEARCH_SCRIPT: &str = r#"(function(){var i=document.getElementById('q');if(!i)return;
-if(i.value&&location.search.indexOf('q=')>-1&&!document.querySelector('[aria-sort]')){i.focus();var n=i.value.length;try{i.setSelectionRange(n,n);}catch(e){}}
-var t;i.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){i.form.submit();},350);});})();"#;
+// ───────────────────────── Ficha de empresa (ejemplo) ─────────────────────────
 
 /// Estado de la tarjeta de comparación con el sector al renderizar la ficha.
 pub enum Bench {
@@ -748,55 +937,54 @@ const BENCH_SCRIPT: &str = r#"(function(){var c=document.querySelector('[data-fr
 function fail(){c.removeAttribute('aria-busy');var s=c.querySelectorAll('.skeleton-row');for(var i=0;i<s.length;i++)s[i].hidden=true;var e=c.querySelector('.bench-error');if(e)e.hidden=false;}
 fetch(u,{headers:{'Accept':'text/html'}}).then(function(r){if(!r.ok)throw 0;return r.text();}).then(function(h){c.innerHTML=h;c.removeAttribute('aria-busy');}).catch(fail);})();"#;
 
-pub fn company_page(company: &Company, tab: &str, bench: &Bench) -> Markup {
+pub fn company_page(c: &Ctx, company: &Company, tab: &str, bench: &Bench) -> Markup {
     let f = &company.financials;
     let growth = (f.revenue[4] as f64 / f.revenue[3] as f64 - 1.0) * 100.0;
     let margin = f.result[4] as f64 / f.revenue[4] as f64 * 100.0;
     let solidity = f.equity[4] as f64 / f.total_assets[4] as f64 * 100.0;
+    let status = c.t(company.status);
 
     layout(
-        DEFAULT_TITLE,
-        &format!("/foretag/{}", company.org_number),
+        c,
+        company.name,
         html! {
-            a.back href="/sok" { (icon_sized("arrow-left", "icon-sm")) "Sökresultat" }
+            a.back href="/sok" { (icon_sized("arrow-left", "icon-sm")) (c.t("co.back")) }
 
             div.company-head {
                 div {
                     h1.company-name { (company.name) }
                     div.company-meta {
-                        (term("Org.nr", "Organisationsnummer: bolagets unika nummer hos Bolagsverket.")) " " (company.org_number)
-                        button.copy-btn type="button" data-copy=(company.org_number) data-tip="Kopiera organisationsnummer"
-                            aria-label=(format!("Kopiera organisationsnummer {}", company.org_number)) {
+                        (term(c.t("co.org_nr"), c.t("tip.org_nr"))) " " (company.org_number)
+                        button.copy-btn type="button" data-copy=(company.org_number) data-tip=(c.t("co.copy_org"))
+                            aria-label=(c.tf("co.copy_org_aria", &[company.org_number])) {
                             span.icon-copy { (icon_sized("copy", "icon-sm")) }
                             span.icon-check { (icon_sized("check", "icon-sm")) }
                         }
-                        " · " (company.legal_form) " · " (company.city)
+                        " · " (c.t(company.legal_form)) " · " (company.city)
                     }
                 }
                 div.pills {
-                    (status_pill(company.status))
-                    (risk_pill(company.risk_level))
+                    (status_pill(status))
+                    (risk_pill(c, company.risk_level))
                 }
             }
 
             dl.kpis {
-                (kpi("Omsättning", "Nettoomsättning: bolagets försäljning under året, i tusen kronor (tkr).",
-                    &format!("{} tkr", format_tkr(f.revenue[4])), false,
+                (kpi(c.t("kpi.revenue"), c.t("tip.revenue"), &c.money(f.revenue[4]), false,
                     html! {
                         (icon_sized(if growth >= 0.0 { "arrow-up-right" } else { "arrow-down-right" }, "icon-sm"))
-                        (format!("{:.1} % mot 2023", growth.abs()))
+                        (sr(c.t(if growth >= 0.0 { "kpi.increase" } else { "kpi.decrease" })))
+                        (c.tf("kpi.vs_year", &[&c.dec(growth.abs(), 1), "2023"]))
                     },
                     if growth >= 0.0 { "up" } else { "down" }))
-                (kpi("Resultat", "Resultat efter finansiella poster, i tusen kronor (tkr).",
-                    &format!("{} tkr", format_tkr(f.result[4])), f.result[4] < 0,
-                    html! { (format!("Vinstmarginal {}", percent1(margin))) }, ""))
-                (kpi("Soliditet", TIP_SOLIDITET, &percent1(solidity), false,
-                    html! { (format!("Eget kapital {} tkr", format_tkr(f.equity[4]))) }, ""))
-                (kpi("Anställda", "Antal anställda enligt SCB, angivet som intervall.",
-                    company.employee_range, false, html! { "SCB, intervall" }, ""))
+                (kpi(c.t("kpi.result"), c.t("tip.result"), &c.money(f.result[4]), f.result[4] < 0,
+                    html! { (c.t("term.margin")) " " (c.pct1(margin)) }, ""))
+                (kpi(c.t("term.solidity"), c.t("tip.solidity"), &c.pct1(solidity), false,
+                    html! { (c.tf("kpi.equity_is", &[&c.money(f.equity[4])])) }, ""))
+                (kpi(c.t("kpi.employees"), c.t("tip.employees"), company.employee_range, false, html! { (c.t("kpi.scb_interval")) }, ""))
             }
 
-            (company_tabs(company, tab, bench))
+            (company_tabs(c, company, tab, bench))
         },
     )
 }
@@ -811,56 +999,52 @@ fn kpi(label: &str, label_tip: &str, value: &str, negative: bool, detail: Markup
     }
 }
 
-const SUB_TABS: [(&str, &str); 4] = [
-    ("ov", "Översikt"),
-    ("fin", "Bokslut"),
-    ("ppl", "Personer"),
-    ("ai", "Sammanfattning"),
-];
+const SUB_TABS: [(&str, &str); 4] = [("ov", "tab.overview"), ("fin", "tab.financials"), ("ppl", "tab.people"), ("ai", "tab.summary")];
 
-fn company_tabs(company: &Company, tab: &str, bench: &Bench) -> Markup {
-    // Pestaña desconocida → Översikt (la inicial del original).
+fn company_tabs(c: &Ctx, company: &Company, tab: &str, bench: &Bench) -> Markup {
+    // Pestaña desconocida → resumen general (la inicial del original).
     let active = SUB_TABS.iter().find(|(id, _)| *id == tab).map(|(id, _)| *id).unwrap_or("ov");
     html! {
-        nav.tabs #vyer aria-label="Företagsvyer" {
+        nav.tabs #vyer aria-label=(c.t("co.views")) {
             @for (id, label) in SUB_TABS.iter() {
                 a.tab aria-current=[(*id == active).then_some("page")]
-                    href=(format!("/foretag/{}?tab={}#vyer", company.org_number, id)) { (label) }
+                    href=(format!("/foretag/{}?tab={}#vyer", company.org_number, id)) { (c.t(label)) }
             }
         }
         @match active {
-            "fin" => { (financials(company)) }
-            "ppl" => { (people(company)) }
-            "ai" => { (summary(company)) }
-            _ => { (overview(company, bench)) }
+            "fin" => { (financials(c, company)) }
+            "ppl" => { (people(c, company)) }
+            "ai" => { (summary(c, company)) }
+            _ => { (overview(c, company, bench)) }
         }
     }
 }
 
-fn overview(company: &Company, bench: &Bench) -> Markup {
+fn overview(c: &Ctx, company: &Company, bench: &Bench) -> Markup {
     let revenue = &company.financials.revenue;
+    let unit = c.t("unit.tkr");
     html! {
         div.overview-grid {
             div.card {
                 h2.card-title {
-                    "Omsättning, 5 år (tkr)"
-                    (info_btn("Om diagrammet", "tkr = tusen kronor, mkr = miljoner kronor. Håll muspekaren över, tabba till eller tryck på en stapel för exakta värden."))
+                    (c.tf("ov.revenue_title", &[unit]))
+                    (info_btn(c.t("ov.about_chart"), c.t("ov.chart_tip")))
                 }
-                (revenue_chart(revenue))
+                (revenue_chart(c, revenue))
                 div.legend aria-hidden="true" {
-                    span.legend-item { span.swatch.past {} "Tidigare år" }
-                    span.legend-item { span.swatch.fill {} "Senaste året" }
-                    span.legend-item { "Värden i mkr" }
+                    span.legend-item { span.swatch.past {} (c.t("ov.legend.past")) }
+                    span.legend-item { span.swatch.fill {} (c.t("ov.legend.latest")) }
+                    span.legend-item { (c.tf("ov.legend.values_in", &[c.t("unit.mkr")])) }
                 }
                 details.chart-data {
-                    summary { "Visa värden som tabell" }
+                    summary { (c.t("chart.show_table")) }
                     div.table-wrap {
                         table {
-                            caption.sr-only { "Omsättning per år, tkr" }
-                            thead { tr { th scope="col" { "År" } th.right scope="col" { "tkr" } } }
+                            caption.sr-only { (c.tf("ov.revenue_caption", &[unit])) }
+                            thead { tr { th scope="col" { (c.t("ov.col.year")) } th.right scope="col" { (unit) } } }
                             tbody {
                                 @for (y, v) in FINANCIAL_YEARS.iter().zip(revenue.iter()) {
-                                    tr { th scope="row" { (y) } td.right.num.mono { (format_tkr(*v)) } }
+                                    tr { th scope="row" { (y) } td.right.num.mono { (c.int(*v)) } }
                                 }
                             }
                         }
@@ -869,107 +1053,159 @@ fn overview(company: &Company, bench: &Bench) -> Markup {
             }
             div.card {
                 h2.card-title {
-                    "Mot branschen (SNI-median)"
-                    (info_btn("Om branschjämförelsen", "SNI är branschkoden från Statistiska centralbyrån. Medianen är mittvärdet: hälften av företagen ligger över och hälften under. Strecket i varje stapel markerar medianen."))
+                    (c.t("ov.bench_title"))
+                    (info_btn(c.t("ov.about_bench"), c.t("ov.bench_tip")))
                 }
                 @match bench {
                     Bench::Pending => {
                         div #bench-body aria-busy="true" data-fragment=(format!("/foretag/{}/benchmarks", company.org_number)) {
-                            (sr("Hämtar branschmedianer från SCB…"))
+                            (sr(c.t("ov.loading_bench")))
                             @for _ in 0..3 {
                                 div.skeleton-row aria-hidden="true" { div.skeleton-line {} div.skeleton-bar {} }
                             }
-                            p.bench-error hidden { "Kunde inte hämta branschmedianer från SCB just nu. Ladda om sidan för att försöka igen." }
-                            noscript { (benchmark_fragment(company, None, Some("JavaScript krävs för att hämta SCB-data. Visar exempelvärden."))) }
+                            p.bench-error hidden { (c.t("ov.bench_error")) }
+                            noscript { (benchmark_fragment(c, company, None, Some(c.t("ov.bench_nojs")))) }
                         }
                         script { (PreEscaped(BENCH_SCRIPT)) }
                     }
-                    Bench::Ready(m) => { div #bench-body { (benchmark_fragment(company, m.as_ref(), None)) } }
-                    Bench::Example => { div #bench-body { (benchmark_fragment(company, None, None)) } }
+                    Bench::Ready(m) => { div #bench-body { (benchmark_fragment(c, company, m.as_ref(), None)) } }
+                    Bench::Example => { div #bench-body { (benchmark_fragment(c, company, None, None)) } }
                 }
             }
         }
 
         div.card.mt-4 {
-            h2.card-title { "Signaler" }
+            h2.card-title { (c.t("ov.signals")) }
             ul.alert-list {
                 @for a in company.alerts.iter() {
-                    (alert_row(a.severity, html! { (a.text) }))
+                    (alert_row(c, a.severity, html! { (c.t(a.text)) }))
                 }
             }
         }
-        p.note { "Verksamhet: " (company.sni) }
+        p.note { (c.t("ov.activity")) ": " (company.sni_code) " " (c.t(company.sni_text)) }
     }
 }
 
-fn financials(company: &Company) -> Markup {
+fn financials(c: &Ctx, company: &Company) -> Markup {
     let f = &company.financials;
     let rows: [(&str, &[i64; 5]); 4] = [
-        ("Omsättning", &f.revenue),
-        ("Resultat efter finansiella poster", &f.result),
-        ("Eget kapital", &f.equity),
-        ("Summa tillgångar", &f.total_assets),
+        ("fin.revenue", &f.revenue),
+        ("fin.result", &f.result),
+        ("fin.equity", &f.equity),
+        ("fin.assets", &f.total_assets),
     ];
+    let unit = c.t("unit.tkr");
     html! {
         div.table-wrap {
             table.fin-table {
-                caption.sr-only { "Bokslut, fem år, tkr" }
+                caption.sr-only { (c.tf("fin.caption", &[unit])) }
                 thead {
                     tr {
-                        th scope="col" { "tkr" }
+                        th scope="col" { (unit) }
                         @for y in FINANCIAL_YEARS.iter() { th.right scope="col" { (y) } }
                     }
                 }
                 tbody {
                     @for (label, values) in rows.iter() {
                         tr {
-                            th scope="row" { (label) }
+                            th scope="row" { (c.t(label)) }
                             @for v in values.iter() {
-                                td.right.num.mono.neg[*v < 0] { (format_tkr(*v)) }
+                                td.right.num.mono.neg[*v < 0] { (c.int(*v)) }
                             }
                         }
                     }
                 }
             }
         }
-        p.note { "Källa: digitalt inlämnade årsredovisningar (iXBRL), Bolagsverket. " (example_badge()) }
+        p.note { (c.t("fin.source")) " " (example_badge(c)) }
         div.mt-3 {
-            button.btn type="button" disabled title="Inte kopplat till Bolagsverket ännu" { "Ladda ner årsredovisning (zip)" }
+            button.btn type="button" disabled title=(c.t("fin.download_tip")) { (c.t("fin.download")) }
         }
     }
 }
 
-fn people(company: &Company) -> Markup {
+fn people(c: &Ctx, company: &Company) -> Markup {
     html! {
         div.table-wrap {
             table {
-                caption.sr-only { "Personer och roller" }
-                thead { tr { th scope="col" { "Roll" } th scope="col" { "Namn" } } }
+                caption.sr-only { (c.t("ppl.caption")) }
+                thead { tr { th scope="col" { (c.t("ppl.role")) } th scope="col" { (c.t("ppl.name")) } } }
                 tbody {
                     @for p in company.people.iter() {
-                        tr { td { (p.role) } td { (p.name) } }
+                        tr { td { (c.t(p.role)) } td { (p.name) } }
                     }
                 }
             }
         }
-        p.mt-3 { "Firmateckning: " strong { (company.firmateckning) } }
-        p.note { "Kräver Bolagsverkets betalda API (fas 2). Namn är påhittade. " (example_badge()) }
+        p.mt-3 { (c.t("ppl.signing")) ": " strong { (c.t(company.signing)) } }
+        p.note { (c.t("ppl.note")) " " (example_badge(c)) }
     }
 }
 
-fn summary(company: &Company) -> Markup {
+fn summary(c: &Ctx, company: &Company) -> Markup {
     html! {
         div.card {
-            h2.card-title { "Automatisk sammanfattning" }
-            p.summary-text { (generate_example_summary(company)) }
-            p.note { "Genererad från siffrorna på fliken Bokslut. Ingen kreditbedömning. " (example_badge()) }
+            h2.card-title { (c.t("sum.title")) }
+            p.summary-text { (generate_example_summary(c.lang, company)) }
+            p.note { (c.t("sum.note")) " " (example_badge(c)) }
         }
     }
 }
 
-/// Ficha con datos REALES de Bolagsverket (API gratuito). Solo hay datos básicos: las cifras
-/// financieras, personas y riesgo requieren otras fuentes y todavía no están conectadas.
-pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
+pub fn company_not_found_page(c: &Ctx) -> Markup {
+    layout(
+        c,
+        c.t("nf.company.title"),
+        html! {
+            div.page-head {
+                h1.page-title { (c.t("nf.company.title")) }
+                p.lead { (c.t("nf.company.text")) }
+            }
+            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) (c.t("nf.to_search")) }
+        },
+    )
+}
+
+pub fn not_found_page(c: &Ctx) -> Markup {
+    layout(
+        c,
+        c.t("nf.page.title"),
+        html! {
+            div.page-head {
+                h1.page-title { (c.t("nf.page.title")) }
+                p.lead { (c.t("nf.page.text")) }
+            }
+            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) (c.t("nf.to_search")) }
+        },
+    )
+}
+
+/// Página de error genérica (403, etc.) con el mismo diseño.
+pub fn message_page(c: &Ctx, title: &str, text: &str) -> Markup {
+    layout(
+        c,
+        title,
+        html! {
+            div.page-head {
+                h1.page-title { (title) }
+                p.lead { (text) }
+            }
+            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) (c.t("nf.to_search")) }
+        },
+    )
+}
+
+// ───────────────────────── Ficha real (Bolagsverket) ─────────────────────────
+
+/// Estado de la sección de cuentas de una ficha real al renderizar: ya en caché, o pendiente de descargar.
+pub enum FinState {
+    Ready(Option<Financials>),
+    Pending,
+}
+
+/// Ficha con datos REALES de Bolagsverket (API gratuito). Los textos de la fuente (actividad, forma jurídica)
+/// están en sueco y se muestran tal cual.
+pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState) -> Markup {
     let address = [o.gatuadress.clone(), Some([o.postnummer.clone(), o.postort.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "))]
         .into_iter()
         .flatten()
@@ -977,18 +1213,18 @@ pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
         .collect::<Vec<_>>()
         .join(", ");
     layout(
-        DEFAULT_TITLE,
-        &format!("/foretag/{}", o.organisationsnummer),
+        c,
+        &o.namn,
         html! {
-            a.back href="/sok" { (icon_sized("arrow-left", "icon-sm")) "Sökresultat" }
+            a.back href="/sok" { (icon_sized("arrow-left", "icon-sm")) (c.t("co.back")) }
 
             div.company-head {
                 div {
                     h1.company-name { (o.namn) }
                     div.company-meta {
-                        (term("Org.nr", "Organisationsnummer: bolagets unika nummer hos Bolagsverket.")) " " (o.formatted_number())
-                        button.copy-btn type="button" data-copy=(o.formatted_number()) data-tip="Kopiera organisationsnummer"
-                            aria-label=(format!("Kopiera organisationsnummer {}", o.formatted_number())) {
+                        (term(c.t("co.org_nr"), c.t("tip.org_nr"))) " " (o.formatted_number())
+                        button.copy-btn type="button" data-copy=(o.formatted_number()) data-tip=(c.t("co.copy_org"))
+                            aria-label=(c.tf("co.copy_org_aria", &[&o.formatted_number()])) {
                             span.icon-copy { (icon_sized("copy", "icon-sm")) }
                             span.icon-check { (icon_sized("check", "icon-sm")) }
                         }
@@ -998,11 +1234,11 @@ pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
                 }
                 div.pills {
                     @if o.aktiv {
-                        (status_pill("Aktiv"))
+                        (status_pill(c.t("status.active")))
                     } @else {
                         span.pill.pill-bad {
                             span.pill-dot aria-hidden="true" {}
-                            @if let Some(d) = &o.avregistreringsdatum { "Avregistrerad " (d) } @else { "Inaktiv" }
+                            @if let Some(d) = &o.avregistreringsdatum { (c.tf("live.deregistered", &[d])) } @else { (c.t("live.inactive")) }
                         }
                     }
                     @for f in o.forfaranden.iter() {
@@ -1012,11 +1248,11 @@ pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
             }
 
             div.card {
-                h2.card-title { "Företagsuppgifter" }
+                h2.card-title { (c.t("live.facts")) }
                 dl.facts {
-                    dt { "Postadress" } dd { @if address.is_empty() { "—" } @else { (address) } }
-                    dt { "Registrerad" } dd { @if o.registreringsdatum.is_empty() { "—" } @else { (o.registreringsdatum) } }
-                    dt { (term("Bransch (SNI)", "SNI är branschkoden från Statistiska centralbyrån.")) }
+                    dt { (c.t("live.address")) } dd { @if address.is_empty() { "—" } @else { (address) } }
+                    dt { (c.t("live.registered")) } dd { @if o.registreringsdatum.is_empty() { "—" } @else { (o.registreringsdatum) } }
+                    dt { (term(c.t("live.sni"), c.t("tip.sni"))) }
                     dd {
                         @if o.sni.is_empty() { "—" } @else {
                             @for (i, (kod, text)) in o.sni.iter().enumerate() {
@@ -1025,67 +1261,61 @@ pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
                             }
                         }
                     }
-                    dt { "Verksamhet" } dd { (o.verksamhetsbeskrivning.clone().unwrap_or_else(|| "—".to_string())) }
+                    dt { (c.t("live.activity")) } dd { (o.verksamhetsbeskrivning.clone().unwrap_or_else(|| "—".to_string())) }
+                }
+                @if c.lang != Lang::Sv {
+                    p.note { (c.t("live.swedish_note")) }
                 }
             }
             div.card.mt-4 {
                 h2.card-title {
-                    "Bokslut"
-                    (info_btn("Om bokslutet", "Siffrorna läses ur bolagets digitalt inlämnade årsredovisningar hos Bolagsverket (iXBRL) och visas i tusen kronor (tkr), avrundade från kronor."))
+                    (c.t("live.financials"))
+                    (info_btn(c.t("live.about_financials"), c.t("live.financials_tip")))
                 }
                 @match fin {
                     FinState::Pending => {
                         div #fin-body aria-busy="true" data-fragment=(format!("/foretag/{}/bokslut", o.organisationsnummer)) {
-                            (sr("Hämtar årsredovisningar från Bolagsverket…"))
+                            (sr(c.t("live.loading")))
                             @for _ in 0..4 {
                                 div.skeleton-row aria-hidden="true" { div.skeleton-line {} div.skeleton-bar {} }
                             }
-                            p.bench-error hidden { "Kunde inte hämta årsredovisningarna just nu. Ladda om sidan för att försöka igen." }
+                            p.bench-error hidden { (c.t("live.error")) }
                         }
                         script { (PreEscaped(BENCH_SCRIPT)) }
                     }
-                    FinState::Ready(f) => { div #fin-body { (financials_fragment(f.as_ref())) } }
+                    FinState::Ready(f) => { div #fin-body { (financials_fragment(c, f.as_ref())) } }
                 }
             }
-            p.note {
-                "Källa: Bolagsverket, värdefulla datamängder (live). Personer och riskbedömning visas inte här — de kräver andra källor som ännu inte är kopplade."
-            }
+            p.note { (c.t("live.source")) }
         },
     )
 }
 
-/// Estado de la sección "Bokslut" de una ficha real al renderizar: ya en caché, o pendiente de descargar.
-pub enum FinState {
-    Ready(Option<Financials>),
-    Pending,
-}
-
 /// Cifras reales de las cuentas anuales: resumen del último año, gráfico de facturación y tabla.
 /// `None` = la empresa no ha presentado cuentas anuales digitales.
-pub fn financials_fragment(fin: Option<&Financials>) -> Markup {
+pub fn financials_fragment(c: &Ctx, fin: Option<&Financials>) -> Markup {
     let Some(fin) = fin.filter(|f| f.latest().is_some()) else {
         return html! {
-            p.muted { "Inga digitalt inlämnade årsredovisningar hittades för det här bolaget." }
-            p.note {
-                "Det gäller till exempel bolag som lämnat in på papper och många större bolag. Siffror visas bara när årsredovisningen finns i digitalt format (K2, K3 eller ESEF) hos Bolagsverket."
-            }
+            p.muted { (c.t("bok.none")) }
+            p.note { (c.t("bok.none_note")) }
         };
     };
     let latest = fin.latest().expect("comprobado arriba");
-    let money = |v: Option<i64>| v.map(|n| format!("{} tkr", format_tkr(n))).unwrap_or_else(|| "—".to_string());
+    let unit = c.t("unit.tkr");
+    let money = |v: Option<i64>| v.map(|n| c.money(n)).unwrap_or_else(|| "—".to_string());
     let chart: Vec<(&str, i64)> = fin.years.iter().filter_map(|y| y.revenue.map(|r| (y.label.as_str(), r))).collect();
     let has_revenue = chart.iter().any(|(_, v)| *v > 0);
     let (chart_labels, chart_values): (Vec<&str>, Vec<i64>) = chart.into_iter().unzip();
     let rows: [(&str, Vec<Option<i64>>); 4] = [
-        ("Omsättning", fin.years.iter().map(|y| y.revenue).collect()),
-        ("Resultat efter finansiella poster", fin.years.iter().map(|y| y.result).collect()),
-        ("Eget kapital", fin.years.iter().map(|y| y.equity).collect()),
-        ("Summa tillgångar", fin.years.iter().map(|y| y.assets).collect()),
+        ("fin.revenue", fin.years.iter().map(|y| y.revenue).collect()),
+        ("fin.result", fin.years.iter().map(|y| y.result).collect()),
+        ("fin.equity", fin.years.iter().map(|y| y.equity).collect()),
+        ("fin.assets", fin.years.iter().map(|y| y.assets).collect()),
     ];
     html! {
         dl.stats {
             div.stat {
-                dt { "Omsättning " (latest.label) }
+                dt { (c.tf("bok.revenue_year", &[latest.label.as_str()])) }
                 dd {
                     (money(latest.revenue))
                     @if let (Some(now), Some(before)) = (latest.revenue, fin.previous().and_then(|p| p.revenue)) {
@@ -1093,47 +1323,47 @@ pub fn financials_fragment(fin: Option<&Financials>) -> Markup {
                             @let change = (now as f64 / before as f64 - 1.0) * 100.0;
                             span.sub.up[change >= 0.0].down[change < 0.0] {
                                 (icon_sized(if change >= 0.0 { "arrow-up-right" } else { "arrow-down-right" }, "icon-sm"))
-                                (sr(if change >= 0.0 { "Ökning " } else { "Minskning " }))
-                                (format!("{:.1} % mot {}", change.abs(), fin.previous().map(|p| p.label.as_str()).unwrap_or("")))
+                                (sr(c.t(if change >= 0.0 { "kpi.increase" } else { "kpi.decrease" })))
+                                (c.tf("kpi.vs_year", &[&c.dec(change.abs(), 1), fin.previous().map(|p| p.label.as_str()).unwrap_or("")]))
                             }
                         }
                     }
                 }
             }
             div.stat {
-                dt { "Resultat" }
+                dt { (c.t("kpi.result")) }
                 dd.neg[latest.result.is_some_and(|r| r < 0)] {
                     (money(latest.result))
-                    @if let Some(m) = latest.margin() { span.sub { (term("Vinstmarginal", TIP_MARGIN)) " " (percent1(m)) } }
+                    @if let Some(m) = latest.margin() { span.sub { (term(c.t("term.margin"), c.t("tip.margin"))) " " (c.pct1(m)) } }
                 }
             }
-            div.stat { dt { "Eget kapital" } dd.neg[latest.equity.is_some_and(|e| e < 0)] { (money(latest.equity)) } }
+            div.stat { dt { (c.t("fin.equity")) } dd.neg[latest.equity.is_some_and(|e| e < 0)] { (money(latest.equity)) } }
             div.stat {
-                dt { (term("Soliditet", TIP_SOLIDITET)) }
-                dd { (latest.solidity().map(percent1).unwrap_or_else(|| "—".to_string())) }
+                dt { (term(c.t("term.solidity"), c.t("tip.solidity"))) }
+                dd { (latest.solidity().map(|s| c.pct1(s)).unwrap_or_else(|| "—".to_string())) }
             }
         }
         @if has_revenue {
-            (bar_chart(&chart_labels, &chart_values))
+            (bar_chart(c, &chart_labels, &chart_values))
         } @else {
-            p.muted { "Ingen omsättning redovisad i årsredovisningarna." }
+            p.muted { (c.t("bok.no_revenue")) }
         }
         div.table-wrap.mt-3 {
             table.fin-table {
-                caption.sr-only { "Bokslut, tkr" }
+                caption.sr-only { (c.tf("fin.caption", &[unit])) }
                 thead {
                     tr {
-                        th scope="col" { "tkr" }
+                        th scope="col" { (unit) }
                         @for y in fin.years.iter() { th.right scope="col" { (y.label) } }
                     }
                 }
                 tbody {
                     @for (label, values) in rows.iter() {
                         tr {
-                            th scope="row" { (label) }
+                            th scope="row" { (c.t(label)) }
                             @for v in values.iter() {
                                 @match v {
-                                    Some(n) => { td.right.num.mono.neg[*n < 0] { (format_tkr(*n)) } }
+                                    Some(n) => { td.right.num.mono.neg[*n < 0] { (c.int(*n)) } }
                                     None => { td.right.num.mono.muted { "—" } }
                                 }
                             }
@@ -1142,183 +1372,139 @@ pub fn financials_fragment(fin: Option<&Financials>) -> Markup {
                 }
             }
         }
-        p.note {
-            "Källa: digitalt inlämnade årsredovisningar (iXBRL), Bolagsverket. Räkenskapsåret slutar " (latest.period_end)
-            ". Belopp i tkr, avrundade från kronor; “—” betyder att uppgiften saknas i årsredovisningen."
-        }
+        p.note { (c.tf("bok.source", &[latest.period_end.as_str()])) }
     }
 }
 
-pub fn live_error_page() -> Markup {
+pub fn live_error_page(c: &Ctx) -> Markup {
     layout(
-        "Kunde inte hämta uppgifterna — Siffra",
-        "/foretag",
+        c,
+        c.t("live.err.title"),
         html! {
             div.page-head {
-                h1.page-title { "Kunde inte hämta uppgifterna" }
-                p.lead { "Bolagsverkets API svarade inte som väntat. Försök igen om en stund, eller kontrollera loggen på servern." }
+                h1.page-title { (c.t("live.err.title")) }
+                p.lead { (c.t("live.err.text")) }
             }
-            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) "Till sökningen" }
+            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) (c.t("nf.to_search")) }
         },
     )
 }
 
-pub fn company_not_found_page() -> Markup {
-    layout(
-        DEFAULT_TITLE,
-        "/foretag",
-        html! {
-            div.page-head {
-                h1.page-title { "Företaget hittades inte" }
-                p.lead {
-                    "I det här scaffoldet finns bara de tre EJEMPLO-företagen. Sök på namn, organisationsnummer eller ort för att hitta dem."
-                }
-            }
-            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) "Till sökningen" }
-        },
-    )
-}
+// ───────────────────────── Otras pantallas ─────────────────────────
 
-pub fn not_found_page() -> Markup {
+pub fn bevakning_page(c: &Ctx) -> Markup {
     layout(
-        "404 — Siffra",
-        "",
+        c,
+        c.t("nav.watch"),
         html! {
-            div.page-head {
-                h1.page-title { "404 — Sidan hittades inte" }
-                p.lead { "Sidan du letar efter finns inte eller har flyttats." }
-            }
-            a.btn.btn-primary href="/sok" { (icon_sized("search", "icon-sm")) "Till sökningen" }
-        },
-    )
-}
-
-pub fn bevakning_page() -> Markup {
-    layout(
-        "Bevakning — Siffra",
-        "/bevakning",
-        html! {
-            div.page-head { h1.page-title { "Bevakning" } }
+            div.page-head { h1.page-title { (c.t("nav.watch")) } }
             div.card.narrow {
                 ul.alert-list {
                     @for a in EXAMPLE_WATCH_ALERTS.iter() {
-                        (alert_row(a.severity, html! {
-                            @if let Some(c) = EXAMPLE_COMPANIES.iter().find(|c| c.name == a.company_name) {
-                                a.alert-link href=(format!("/foretag/{}", c.org_number)) { (a.company_name) }
+                        (alert_row(c, a.severity, html! {
+                            @if let Some(co) = EXAMPLE_COMPANIES.iter().find(|co| co.name == a.company_name) {
+                                a.alert-link href=(format!("/foretag/{}", co.org_number)) { (a.company_name) }
                             } @else {
                                 strong { (a.company_name) }
                             }
                             br;
-                            (a.text) " " span.muted { "· " (a.when) }
+                            (c.t(a.text)) " " span.muted { "· " (c.t(a.when)) }
                         }))
                     }
                 }
             }
-            p.note lang="es" {
-                (example_badge())
-                " Mail varje måndag med det som ändrats. Fase 2 del plan de trabajo — depende de notificaciones de Bolagsverket (API de pago) o comparación semanal del archivo gratuito."
-            }
+            p.note { (example_badge(c)) " " (c.t("watch.note")) }
         },
     )
 }
 
-pub fn likviditet_page() -> Markup {
+pub fn likviditet_page(c: &Ctx) -> Markup {
+    let unit = c.t("unit.tkr");
     layout(
-        "Likviditetsprognos — Siffra",
-        "/likviditet",
+        c,
+        c.t("nav.liquidity"),
         html! {
-            div.page-head { h1.page-title { "Likviditetsprognos, 13 veckor" } }
+            div.page-head { h1.page-title { (c.t("liq.title")) } }
             div.card.narrow {
                 h2.card-title {
-                    "Förväntad kassa (tkr)"
-                    (info_btn("Om diagrammet", "Kassa per vecka: startsaldot plus inbetalningar minus utbetalningar. Håll muspekaren över, tabba till eller tryck på en stapel för detaljer."))
+                    (c.tf("liq.card_title", &[unit]))
+                    (info_btn(c.t("ov.about_chart"), c.t("liq.chart_tip")))
                 }
-                (cash_flow_chart(&EXAMPLE_CASH_WEEKS, EXAMPLE_CASH_START_BALANCE))
+                (cash_flow_chart(c, &EXAMPLE_CASH_WEEKS, EXAMPLE_CASH_START_BALANCE))
             }
             div.card.narrow.mt-3 {
-                ul.alert-list {
-                    (alert_row(Severity::Warn, html! {
-                        span lang="es" { "Momsinbetalning och löner infaller samma vecka som el mínimo de caja." }
-                    }))
-                }
+                ul.alert-list { (alert_row(c, Severity::Warn, html! { (c.t("liq.alert")) })) }
             }
-            p.note lang="es" {
-                (example_badge())
-                " Beräknat från kund- och leverantörsfakturor och återkommande betalningar. Fase 3 del plan de trabajo — requiere importación SIE."
-            }
+            p.note { (example_badge(c)) " " (c.t("liq.note")) }
         },
     )
 }
 
-pub fn sie_page() -> Markup {
+pub fn sie_page(c: &Ctx) -> Markup {
     layout(
-        "Importera SIE — Siffra",
-        "/sie",
+        c,
+        c.t("nav.sie"),
         html! {
-            div.page-head { h1.page-title { "Importera bokföring (SIE)" } }
+            div.page-head { h1.page-title { (c.t("sie.title")) } }
             div.dropzone aria-disabled="true" {
                 (icon("upload"))
-                strong { "Släpp en SIE-fil här" }
-                p { "SIE 4 från Fortnox, Visma, Bokio eller annat program." }
-                button.btn type="button" disabled { "Välj fil" }
-                p.fine { "Ej aktiv i demon: filimport är inte kopplad ännu." }
+                strong { (c.t("sie.drop")) }
+                p { (c.t("sie.formats")) }
+                button.btn type="button" disabled { (c.t("sie.choose")) }
+                p.fine { (c.t("sie.inactive")) }
             }
             div.card.narrow.mt-3 {
-                h2.card-title { "Förhandsvisning" }
+                h2.card-title { (c.t("sie.preview")) }
                 div.scroll-x {
                     table {
-                        caption.sr-only { "Förhandsvisning av konton" }
+                        caption.sr-only { (c.t("sie.caption")) }
                         thead {
                             tr {
-                                th scope="col" { "Konto (BAS)" }
-                                th scope="col" { "Namn" }
-                                th.right scope="col" { "Saldo" }
+                                th scope="col" { (c.t("sie.col.account")) }
+                                th scope="col" { (c.t("sie.col.name")) }
+                                th.right scope="col" { (c.t("sie.col.balance")) }
                             }
                         }
                         tbody {
                             @for row in EXAMPLE_SIE_PREVIEW.iter() {
                                 tr {
                                     td.mono { (row.account) }
-                                    td { (row.name) }
-                                    td.right.num.mono.neg[row.balance_sek < 0] { (format_int(row.balance_sek)) }
+                                    td { (c.t(row.name)) }
+                                    td.right.num.mono.neg[row.balance_sek < 0] { (c.int(row.balance_sek)) }
                                 }
                             }
                         }
                     }
                 }
             }
-            p.note lang="es" {
-                (example_badge())
-                " No hay parser SIE real todavía (Fase 3). Este es solo el layout de la pantalla."
-            }
+            p.note { (example_badge(c)) " " (c.t("sie.note")) }
         },
     )
 }
 
-pub fn fakturor_page() -> Markup {
-    let sum = |status: &str| -> i64 {
-        EXAMPLE_INVOICES.iter().filter(|i| i.status == status).map(|i| i.amount_sek).sum()
-    };
+pub fn fakturor_page(c: &Ctx) -> Markup {
+    let sum = |key: &str| -> i64 { EXAMPLE_INVOICES.iter().filter(|i| i.status == key).map(|i| i.amount_sek).sum() };
+    let sek = c.t("unit.sek");
     layout(
-        "Kundfakturor — Siffra",
-        "/fakturor",
+        c,
+        c.t("nav.invoices"),
         html! {
-            div.page-head { h1.page-title { "Kundfakturor" } }
+            div.page-head { h1.page-title { (c.t("inv.title")) } }
             dl.stats {
-                div.stat { dt { "Förfallet" } dd.neg { (format_int(sum("Förfallen"))) " kr" } }
-                div.stat { dt { "Obetalt" } dd { (format_int(sum("Obetald"))) " kr" } }
-                div.stat { dt { "Betalt" } dd { (format_int(sum("Betald"))) " kr" } }
+                div.stat { dt { (c.t("inv.overdue")) } dd.neg { (c.int(sum("inv.overdue"))) " " (sek) } }
+                div.stat { dt { (c.t("inv.unpaid")) } dd { (c.int(sum("inv.unpaid"))) " " (sek) } }
+                div.stat { dt { (c.t("inv.paid")) } dd { (c.int(sum("inv.paid"))) " " (sek) } }
             }
             div.table-wrap {
                 table {
-                    caption.sr-only { "Kundfakturor" }
+                    caption.sr-only { (c.t("inv.title")) }
                     thead {
                         tr {
-                            th scope="col" { "Nr" }
-                            th scope="col" { "Kund" }
-                            th.right scope="col" { "Belopp (kr)" }
-                            th scope="col" { "Förfaller" }
-                            th scope="col" { "Status" }
+                            th scope="col" { (c.t("inv.col.no")) }
+                            th scope="col" { (c.t("inv.col.customer")) }
+                            th.right scope="col" { (c.tf("inv.col.amount", &[sek])) }
+                            th scope="col" { (c.t("inv.col.due")) }
+                            th scope="col" { (c.t("inv.col.status")) }
                         }
                     }
                     tbody {
@@ -1326,18 +1512,15 @@ pub fn fakturor_page() -> Markup {
                             tr {
                                 td.mono { (inv.number) }
                                 td { (inv.customer) }
-                                td.right.num.mono { (format_int(inv.amount_sek)) }
+                                td.right.num.mono { (c.int(inv.amount_sek)) }
                                 td.num { (inv.due_date) }
-                                td { span class={"pill pill-" (sev_class(inv.severity))} { span.pill-dot aria-hidden="true" {} (inv.status) } }
+                                td { span class={"pill pill-" (sev_class(inv.severity))} { span.pill-dot aria-hidden="true" {} (c.t(inv.status)) } }
                             }
                         }
                     }
                 }
             }
-            p.note lang="es" {
-                (example_badge())
-                " Fase 3+ del plan de trabajo. El cliente podrá ser avisado si el pagador tiene riesgo elevado."
-            }
+            p.note { (example_badge(c)) " " (c.t("inv.note")) }
         },
     )
 }

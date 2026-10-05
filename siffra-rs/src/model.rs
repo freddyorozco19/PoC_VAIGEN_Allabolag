@@ -1,8 +1,8 @@
 //! Modelo de dominio y datos de EJEMPLO de Siffra.
 //!
-//! Equivale a `src/lib/types.ts` y `src/lib/mock/companies.ts` del scaffold
-//! Next.js. Las tres empresas son FICTICIAS; se copiaron tal cual del mockup
-//! validado para no perder el diseño ya revisado.
+//! Las tres empresas son FICTICIAS. Todos los textos visibles (actividad, roles, señales, estados…) son
+//! CLAVES del catálogo de idiomas (`catalog.rs`), no texto: así se muestran en español, inglés o sueco.
+//! Los nombres propios (empresas, personas, ciudades, clientes) no se traducen.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
@@ -16,10 +16,12 @@ pub type RiskLevel = Severity;
 
 pub struct CompanyAlert {
     pub severity: Severity,
+    /// Clave del catálogo.
     pub text: &'static str,
 }
 
 pub struct CompanyPerson {
+    /// Clave del catálogo (cargo).
     pub role: &'static str,
     pub name: &'static str,
 }
@@ -46,11 +48,8 @@ pub struct BenchmarkPair {
 }
 
 pub struct CompanyBenchmarks {
-    /// Vinstmarginal, en %.
     pub margin: BenchmarkPair,
-    /// Soliditet, en %.
     pub solidity: BenchmarkPair,
-    /// Kassalikviditet, en %.
     pub liquidity: BenchmarkPair,
 }
 
@@ -59,14 +58,18 @@ pub struct Company {
     pub name: &'static str,
     /// Organisationsnummer sueco, formato NNNNNN-NNNN.
     pub org_number: &'static str,
+    /// Clave: forma jurídica.
     pub legal_form: &'static str,
-    /// Código y descripción SNI (actividad económica).
-    pub sni: &'static str,
+    /// Código SNI ("52.290") y clave de su descripción.
+    pub sni_code: &'static str,
+    pub sni_text: &'static str,
     pub city: &'static str,
     pub employee_range: &'static str,
+    /// Clave: estado.
     pub status: &'static str,
     pub risk_level: RiskLevel,
-    pub firmateckning: &'static str,
+    /// Clave: firmateckning.
+    pub signing: &'static str,
     pub people: &'static [CompanyPerson],
     pub alerts: &'static [CompanyAlert],
     pub financials: FinancialHistory,
@@ -79,6 +82,7 @@ pub const FINANCIAL_YEARS: [&str; 5] = ["2020", "2021", "2022", "2023", "2024"];
 pub struct WatchAlert {
     pub severity: Severity,
     pub company_name: &'static str,
+    /// Claves del catálogo.
     pub text: &'static str,
     pub when: &'static str,
 }
@@ -94,12 +98,14 @@ pub struct Invoice {
     pub customer: &'static str,
     pub amount_sek: i64,
     pub due_date: &'static str,
+    /// Clave del catálogo.
     pub status: &'static str,
     pub severity: Severity,
 }
 
 pub struct SieAccountPreview {
     pub account: &'static str,
+    /// Clave del catálogo.
     pub name: &'static str,
     pub balance_sek: i64,
 }
@@ -109,21 +115,22 @@ pub static EXAMPLE_COMPANIES: [Company; 3] = [
         id: "a",
         name: "Nordlys Logistik AB",
         org_number: "559012-3456",
-        legal_form: "Aktiebolag",
-        sni: "52.290 Övriga stödtjänster till transport",
+        legal_form: "legal.ab",
+        sni_code: "52.290",
+        sni_text: "sni.52290",
         city: "Göteborg",
         employee_range: "10–19",
-        status: "Aktiv",
+        status: "status.active",
         risk_level: Severity::Good,
-        firmateckning: "Två i förening",
+        signing: "sign.two",
         people: &[
-            CompanyPerson { role: "Verkställande direktör", name: "Anna Testsson" },
-            CompanyPerson { role: "Styrelseordförande", name: "Bo Exempelsson" },
-            CompanyPerson { role: "Ledamot", name: "Cilla Provdotter" },
+            CompanyPerson { role: "role.ceo", name: "Anna Testsson" },
+            CompanyPerson { role: "role.chair", name: "Bo Exempelsson" },
+            CompanyPerson { role: "role.member", name: "Cilla Provdotter" },
         ],
         alerts: &[
-            CompanyAlert { severity: Severity::Good, text: "Nya årsredovisningen registrerades 12 juni" },
-            CompanyAlert { severity: Severity::Warn, text: "Styrelseledamot bytt i mars" },
+            CompanyAlert { severity: Severity::Good, text: "alert.report_filed" },
+            CompanyAlert { severity: Severity::Warn, text: "alert.board_change" },
         ],
         financials: FinancialHistory {
             revenue: [41200, 45800, 52300, 58900, 64100],
@@ -141,21 +148,22 @@ pub static EXAMPLE_COMPANIES: [Company; 3] = [
         id: "b",
         name: "Fjällbruk Bygg & Design AB",
         org_number: "559108-7721",
-        legal_form: "Aktiebolag",
-        sni: "41.200 Byggande av bostadshus och andra byggnader",
+        legal_form: "legal.ab",
+        sni_code: "41.200",
+        sni_text: "sni.41200",
         city: "Östersund",
         employee_range: "20–49",
-        status: "Aktiv",
+        status: "status.active",
         risk_level: Severity::Bad,
-        firmateckning: "Var för sig",
+        signing: "sign.alone",
         people: &[
-            CompanyPerson { role: "Verkställande direktör", name: "Dan Exempelson" },
-            CompanyPerson { role: "Styrelseordförande", name: "Eva Testlund" },
+            CompanyPerson { role: "role.ceo", name: "Dan Exempelson" },
+            CompanyPerson { role: "role.chair", name: "Eva Testlund" },
         ],
         alerts: &[
-            CompanyAlert { severity: Severity::Bad, text: "Förlust två år i rad" },
-            CompanyAlert { severity: Severity::Bad, text: "Eget kapital under halva aktiekapitalet" },
-            CompanyAlert { severity: Severity::Warn, text: "Ny adress registrerad i april" },
+            CompanyAlert { severity: Severity::Bad, text: "alert.loss_two_years" },
+            CompanyAlert { severity: Severity::Bad, text: "alert.equity_below_half" },
+            CompanyAlert { severity: Severity::Warn, text: "alert.new_address" },
         ],
         financials: FinancialHistory {
             revenue: [88300, 91200, 84500, 79800, 72400],
@@ -173,20 +181,21 @@ pub static EXAMPLE_COMPANIES: [Company; 3] = [
         id: "c",
         name: "Kvarn & Krydda Livs AB",
         org_number: "559234-9905",
-        legal_form: "Aktiebolag",
-        sni: "47.290 Övrig specialiserad butikshandel med livsmedel",
+        legal_form: "legal.ab",
+        sni_code: "47.290",
+        sni_text: "sni.47290",
         city: "Uppsala",
         employee_range: "5–9",
-        status: "Aktiv",
+        status: "status.active",
         risk_level: Severity::Warn,
-        firmateckning: "Var för sig",
+        signing: "sign.alone",
         people: &[
-            CompanyPerson { role: "Verkställande direktör", name: "Fredrik Provsson" },
-            CompanyPerson { role: "Styrelseordförande", name: "Gun Testström" },
+            CompanyPerson { role: "role.ceo", name: "Fredrik Provsson" },
+            CompanyPerson { role: "role.chair", name: "Gun Testström" },
         ],
         alerts: &[
-            CompanyAlert { severity: Severity::Warn, text: "Marginalen är under sektorns median" },
-            CompanyAlert { severity: Severity::Good, text: "Inga anmärkningar registrerade i ejemplo" },
+            CompanyAlert { severity: Severity::Warn, text: "alert.margin_below_median" },
+            CompanyAlert { severity: Severity::Good, text: "alert.no_remarks" },
         ],
         financials: FinancialHistory {
             revenue: [9800, 10400, 11900, 12100, 13300],
@@ -216,9 +225,7 @@ pub fn search_example_companies(query: &str) -> Vec<&'static Company> {
     EXAMPLE_COMPANIES
         .iter()
         .filter(|c| {
-            c.name.to_lowercase().contains(&q)
-                || c.org_number.contains(&q)
-                || c.city.to_lowercase().contains(&q)
+            c.name.to_lowercase().contains(&q) || c.org_number.contains(&q) || c.city.to_lowercase().contains(&q)
         })
         .collect()
 }
@@ -227,20 +234,20 @@ pub static EXAMPLE_WATCH_ALERTS: [WatchAlert; 3] = [
     WatchAlert {
         severity: Severity::Bad,
         company_name: "Fjällbruk Bygg & Design AB",
-        text: "Förlust två år i rad registrerad",
-        when: "idag",
+        text: "watch.loss_registered",
+        when: "when.today",
     },
     WatchAlert {
         severity: Severity::Warn,
         company_name: "Kvarn & Krydda Livs AB",
-        text: "Ny adress registrerad",
-        when: "för 3 dagar sedan",
+        text: "watch.address_registered",
+        when: "when.three_days",
     },
     WatchAlert {
         severity: Severity::Good,
         company_name: "Nordlys Logistik AB",
-        text: "Ny årsredovisning finns",
-        when: "för 1 vecka sedan",
+        text: "watch.report_available",
+        when: "when.one_week",
     },
 ];
 
@@ -269,7 +276,7 @@ pub static EXAMPLE_INVOICES: [Invoice; 3] = [
         customer: "Hamnkraft Test AB",
         amount_sek: 48500,
         due_date: "2025-02-14",
-        status: "Förfallen",
+        status: "inv.overdue",
         severity: Severity::Bad,
     },
     Invoice {
@@ -277,7 +284,7 @@ pub static EXAMPLE_INVOICES: [Invoice; 3] = [
         customer: "Sundsvall Demo AB",
         amount_sek: 22000,
         due_date: "2025-03-02",
-        status: "Obetald",
+        status: "inv.unpaid",
         severity: Severity::Warn,
     },
     Invoice {
@@ -285,14 +292,14 @@ pub static EXAMPLE_INVOICES: [Invoice; 3] = [
         customer: "Lindqvist Prov AB",
         amount_sek: 75300,
         due_date: "2025-03-20",
-        status: "Betald",
+        status: "inv.paid",
         severity: Severity::Good,
     },
 ];
 
 pub static EXAMPLE_SIE_PREVIEW: [SieAccountPreview; 4] = [
-    SieAccountPreview { account: "1930", name: "Företagskonto", balance_sek: 412300 },
-    SieAccountPreview { account: "1510", name: "Kundfordringar", balance_sek: 286500 },
-    SieAccountPreview { account: "2440", name: "Leverantörsskulder", balance_sek: -174900 },
-    SieAccountPreview { account: "2610", name: "Utgående moms 25 %", balance_sek: -61200 },
+    SieAccountPreview { account: "1930", name: "acct.bank", balance_sek: 412300 },
+    SieAccountPreview { account: "1510", name: "acct.receivables", balance_sek: 286500 },
+    SieAccountPreview { account: "2440", name: "acct.payables", balance_sek: -174900 },
+    SieAccountPreview { account: "2610", name: "acct.vat", balance_sek: -61200 },
 ];

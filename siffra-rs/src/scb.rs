@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::i18n::Lang;
+
 const TABLE: &str = "TAB1270";
 const CODE_MARGIN: &str = "0000032H";
 const CODE_SOLIDITY: &str = "00000340";
@@ -131,12 +133,12 @@ pub fn parse_medians(json: &Value, sni: &str, size_class: &str) -> Option<Sector
 }
 
 /// `Ok(None)` = SCB no tiene ese dato (código inexistente o celda suprimida). `Err` si SCB falla.
-async fn fetch_medians(sni: &str, size_class: &str) -> Result<Option<SectorMedians>, String> {
+async fn fetch_medians(sni: &str, size_class: &str, lang: Lang) -> Result<Option<SectorMedians>, String> {
     let contents = [CODE_MARGIN, CODE_SOLIDITY, CODE_LIQUIDITY].join(",");
     let res = CLIENT
         .get(format!("{}/tables/{TABLE}/data", base_url()))
         .query(&[
-            ("lang", "sv"),
+            ("lang", lang.scb_lang()),
             ("outputFormat", "json-stat2"),
             ("valueCodes[SNI2007]", sni),
             ("valueCodes[Storleksklass]", size_class),
@@ -160,16 +162,17 @@ async fn fetch_medians(sni: &str, size_class: &str) -> Result<Option<SectorMedia
     Ok(parse_medians(&json, sni, size_class))
 }
 
-fn cache_key(first: &str, wanted: Option<&str>) -> String {
-    format!("{first}|{}", wanted.unwrap_or("TOT"))
+fn cache_key(first: &str, wanted: Option<&str>, lang: Lang) -> String {
+    // Las etiquetas de SCB solo existen en sueco e inglés: la caché distingue entre esos dos.
+    format!("{first}|{}|{}", wanted.unwrap_or("TOT"), lang.scb_lang())
 }
 
 /// Mira la caché sin llamar a SCB. `Some(valor)` si ya hay un resultado fresco (que puede ser
 /// "sin datos" = `Some(None)`); `None` si habría que preguntar a SCB (la ficha usa un esqueleto de carga).
-pub fn peek(sni: &str, employee_range: &str) -> Option<Option<SectorMedians>> {
+pub fn peek(sni: &str, employee_range: &str, lang: Lang) -> Option<Option<SectorMedians>> {
     let candidates = sni_candidates(sni);
     let first = candidates.first()?;
-    let key = cache_key(first, size_class_from_employee_range(employee_range));
+    let key = cache_key(first, size_class_from_employee_range(employee_range), lang);
     let guard = CACHE.lock().unwrap();
     let (at, value) = guard.get(&key)?;
     (at.elapsed() < CACHE_TTL).then(|| value.clone())
@@ -177,12 +180,12 @@ pub fn peek(sni: &str, employee_range: &str) -> Option<Option<SectorMedians>> {
 
 /// Medianas del sector para una empresa, según su SNI y su tramo de empleados.
 /// `Ok(None)` si SCB no tiene datos en ningún nivel. `Err` si SCB no responde.
-pub async fn get_sector_medians(sni: &str, employee_range: &str) -> Result<Option<SectorMedians>, String> {
+pub async fn get_sector_medians(sni: &str, employee_range: &str, lang: Lang) -> Result<Option<SectorMedians>, String> {
     let candidates = sni_candidates(sni);
     let Some(first) = candidates.first() else { return Ok(None) };
     let wanted = size_class_from_employee_range(employee_range);
 
-    let key = cache_key(first, wanted);
+    let key = cache_key(first, wanted, lang);
     if let Some((at, value)) = CACHE.lock().unwrap().get(&key) {
         if at.elapsed() < CACHE_TTL {
             return Ok(value.clone());
@@ -197,7 +200,7 @@ pub async fn get_sector_medians(sni: &str, employee_range: &str) -> Result<Optio
     let mut result = None;
     'search: for size in sizes {
         for code in &candidates {
-            if let Some(mut found) = fetch_medians(code, size).await? {
+            if let Some(mut found) = fetch_medians(code, size, lang).await? {
                 found.exact_sni = code == first;
                 found.exact_size = Some(size) == wanted;
                 result = Some(found);
@@ -265,12 +268,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requiere red"]
     async fn live_scb_lookup() {
-        let m = get_sector_medians("52.290 x", "10–19").await.unwrap().unwrap();
+        let m = get_sector_medians("52.290 x", "10–19", Lang::En).await.unwrap().unwrap();
         assert!(m.exact_sni && m.exact_size);
         assert!(m.liquidity > 0.0);
-        let fallback = get_sector_medians("47.290 x", "5–9").await.unwrap().unwrap();
+        let fallback = get_sector_medians("47.290 x", "5–9", Lang::Sv).await.unwrap().unwrap();
         assert_eq!(fallback.sni_code, "47.29");
         assert!(!fallback.exact_sni);
-        assert!(get_sector_medians("99.999 x", "10–19").await.unwrap().is_none());
+        assert!(get_sector_medians("99.999 x", "10–19", Lang::Es).await.unwrap().is_none());
     }
 }

@@ -1,52 +1,36 @@
 //! Siffra — réplica en Rust del scaffold Next.js (MVP de inteligencia financiera de empresas suecas).
 //!
-//! Servidor Axum con HTML renderizado en servidor (maud). Todos los datos son de EJEMPLO.
+//! Servidor Axum con HTML renderizado en servidor (maud), en español, inglés y sueco. Acceso con cuentas
+//! (superadmin, admin, user) guardadas en SQLite y registro de actividad que solo ve el superadmin.
 
 mod annual_report;
+mod app;
+mod auth;
 mod bolagsverket;
+mod catalog;
+mod db;
 mod format;
+mod handlers;
+mod i18n;
 mod model;
 mod scb;
 mod summary;
+mod util;
 mod views;
+mod views_admin;
+
+#[cfg(test)]
+mod tests;
 
 use std::net::SocketAddr;
 
-use axum::{
-    extract::{Path, Query},
-    http::{header, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
-    routing::get,
-    Router,
-};
-use maud::Markup;
-use serde::Deserialize;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{middleware, Router};
 
-const STYLES: &str = include_str!("../static/styles.css");
-
-fn html(markup: Markup) -> Response {
-    Html(markup.into_string()).into_response()
-}
-
-fn html_status(status: StatusCode, markup: Markup) -> Response {
-    (status, Html(markup.into_string())).into_response()
-}
-
-#[derive(Deserialize)]
-struct SokParams {
-    q: Option<String>,
-    sort: Option<String>,
-    dir: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CompanyParams {
-    tab: Option<String>,
-}
-
-async fn root() -> Redirect {
-    Redirect::temporary("/sok")
-}
+use crate::app::{session_mw, AppState};
+use crate::db::{Db, NewUser, Role};
+use crate::i18n::Lang;
 
 /// Lee `.env.local` (en la carpeta actual o en la raíz del repositorio) y define las variables que
 /// aún no existan en el entorno. Es el mismo archivo que usa el proyecto Next.js; git lo ignora.
@@ -68,510 +52,196 @@ pub(crate) fn load_dotenv() {
     }
 }
 
-async fn sok(Query(p): Query<SokParams>) -> Response {
-    let q = p.q.as_deref().unwrap_or("");
-    // Un organisationsnummer que no es de EJEMPLO se busca en Bolagsverket (si hay credenciales).
-    // Este API solo consulta por número, no por nombre.
-    let live = if model::search_example_companies(q).is_empty() && bolagsverket::configured() {
-        match bolagsverket::normalize_org_number(q) {
-            Some(n) => match bolagsverket::get_organisation_by_number(&n).await {
-                Ok(o) => Some(o),
-                Err(bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_)) => None,
-                Err(e) => {
-                    eprintln!("{e}");
-                    None
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-    html(views::sok_page(q, p.sort.as_deref(), p.dir.as_deref(), live.as_ref()))
+async fn favicon() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
-/// Empresa que no es de EJEMPLO: ficha real de Bolagsverket si hay credenciales; si no, 404 como antes.
-async fn live_company(org: &str) -> Response {
-    if !bolagsverket::configured() {
-        return html_status(StatusCode::NOT_FOUND, views::company_not_found_page());
-    }
-    match bolagsverket::get_organisation_by_number(org).await {
-        Ok(o) => {
-            // Las cuentas anuales requieren descargar y leer hasta 3 informes (varios segundos): si no están
-            // en caché, la ficha sale al instante con un esqueleto y el navegador pide `/foretag/:org/bokslut`.
-            let fin = match annual_report::peek(&o.organisationsnummer) {
-                Some(f) => views::FinState::Ready(f),
-                None => views::FinState::Pending,
-            };
-            html(views::live_profile_page(&o, &fin))
-        }
-        Err(bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_)) => {
-            html_status(StatusCode::NOT_FOUND, views::company_not_found_page())
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            // Límite de 60 peticiones/minuto superado → 429; cualquier otro fallo del API → 502.
-            let status = match e {
-                bolagsverket::BvError::Upstream { status: Some(429), .. } => StatusCode::TOO_MANY_REQUESTS,
-                _ => StatusCode::BAD_GATEWAY,
-            };
-            html_status(status, views::live_error_page())
-        }
-    }
-}
-
-async fn company(Path(org): Path<String>, Query(p): Query<CompanyParams>) -> Response {
-    match model::find_example_company(&org) {
-        Some(c) => {
-            // Medianas reales del sector (SCB). Si ya están en caché la ficha sale completa al instante;
-            // si no, sale con un esqueleto y el navegador pide el fragmento (`/foretag/:org/benchmarks`),
-            // para no bloquear la página 2-4 s esperando a SCB.
-            let bench = if !scb::enabled() {
-                views::Bench::Example
-            } else {
-                match scb::peek(c.sni, c.employee_range) {
-                    Some(m) => views::Bench::Ready(m),
-                    None => views::Bench::Pending,
-                }
-            };
-            html(views::company_page(c, p.tab.as_deref().unwrap_or("ov"), &bench))
-        }
-        None => live_company(&org).await,
-    }
-}
-
-/// Fragmento HTML con las cifras de las cuentas anuales de una empresa real (lo pide la ficha en segundo plano).
-async fn company_bokslut(Path(org): Path<String>) -> Response {
-    if model::find_example_company(&org).is_some() || !bolagsverket::configured() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match annual_report::get_financials(&org).await {
-        Ok(f) => html(views::financials_fragment(f.as_ref())),
-        Err(e @ (bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_))) => {
-            eprintln!("{e}"); // visible en el registro: un rechazo silencioso ocultó un fallo real
-            StatusCode::NOT_FOUND.into_response()
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            let status = match e {
-                bolagsverket::BvError::Upstream { status: Some(429), .. } => StatusCode::TOO_MANY_REQUESTS,
-                _ => StatusCode::BAD_GATEWAY,
-            };
-            status.into_response()
-        }
-    }
-}
-
-/// Fragmento HTML con la comparación con el sector (lo pide la ficha cuando SCB aún no estaba en caché).
-async fn company_benchmarks(Path(org): Path<String>) -> Response {
-    let Some(c) = model::find_example_company(&org) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let (medians, notice) = if scb::enabled() {
-        match scb::get_sector_medians(c.sni, c.employee_range).await {
-            Ok(m) => (m, None),
-            Err(e) => {
-                eprintln!("{e}");
-                (None, Some("Kunde inte hämta SCB-data just nu. Visar exempelvärden."))
-            }
-        }
-    } else {
-        (None, None)
-    };
-    html(views::benchmark_fragment(c, medians.as_ref(), notice))
-}
-
-async fn bevakning() -> Response {
-    html(views::bevakning_page())
-}
-
-async fn likviditet() -> Response {
-    html(views::likviditet_page())
-}
-
-async fn sie() -> Response {
-    html(views::sie_page())
-}
-
-async fn fakturor() -> Response {
-    html(views::fakturor_page())
-}
-
-async fn styles() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], STYLES)
-}
-
-async fn fallback() -> Response {
-    html_status(StatusCode::NOT_FOUND, views::not_found_page())
-}
-
-fn app() -> Router {
+pub fn router(state: AppState) -> Router {
+    use handlers as h;
     Router::new()
-        .route("/", get(root))
-        .route("/sok", get(sok))
-        .route("/foretag/:org", get(company))
-        .route("/foretag/:org/benchmarks", get(company_benchmarks))
-        .route("/foretag/:org/bokslut", get(company_bokslut))
-        .route("/bevakning", get(bevakning))
-        .route("/likviditet", get(likviditet))
-        .route("/sie", get(sie))
-        .route("/fakturor", get(fakturor))
-        .route("/static/styles.css", get(styles))
-        .fallback(fallback)
+        .route("/", get(h::root))
+        .route("/healthz", get(h::healthz))
+        .route("/favicon.ico", get(favicon))
+        .route("/static/styles.css", get(h::styles))
+        // Cuentas
+        .route("/login", get(h::login_get).post(h::login_post))
+        .route("/logout", post(h::logout_post))
+        .route("/profile", get(h::profile_get).post(h::profile_post))
+        .route("/profile/password", post(h::profile_password_post))
+        // Usuarios (admin y superadmin)
+        .route("/users", get(h::users_list).post(h::user_create))
+        .route("/users/new", get(h::user_new_get))
+        .route("/users/:id", post(h::user_update))
+        .route("/users/:id/edit", get(h::user_edit_get))
+        .route("/users/:id/delete", get(h::user_delete_get).post(h::user_delete_post))
+        .route("/users/:id/reset-password", post(h::user_reset_post))
+        // Actividad (solo superadmin)
+        .route("/activity", get(h::activity_get))
+        .route("/activity.csv", get(h::activity_csv))
+        // Aplicación
+        .route("/sok", get(h::sok))
+        .route("/foretag/:org", get(h::company))
+        .route("/foretag/:org/benchmarks", get(h::company_benchmarks))
+        .route("/foretag/:org/bokslut", get(h::company_bokslut))
+        .route("/bevakning", get(h::bevakning))
+        .route("/likviditet", get(h::likviditet))
+        .route("/sie", get(h::sie))
+        .route("/fakturor", get(h::fakturor))
+        .fallback(h::fallback)
+        .layer(middleware::from_fn_with_state(state.clone(), session_mw))
+        .with_state(state)
+}
+
+// ───────────────────────── Línea de comandos ─────────────────────────
+
+fn open_db() -> Db {
+    let path = std::env::var("SIFFRA_DB").unwrap_or_else(|_| "siffra.db".to_string());
+    match Db::open(&path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("No se pudo abrir la base de datos {path}: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `--clave valor` de la lista de argumentos.
+fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// Contraseña desde una variable de entorno (para no dejarla en el historial del shell) o generada.
+fn password_for_cli(args: &[String]) -> (String, bool) {
+    match flag(args, "--password-env").and_then(|var| std::env::var(var).ok()).filter(|p| !p.is_empty()) {
+        Some(p) => (p, false),
+        None => (util::gen_password(14), true),
+    }
+}
+
+fn fail(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(2);
+}
+
+const USAGE: &str = "Uso:
+  siffra-rs                       Inicia el servidor (PORT, SIFFRA_DB, SIFFRA_SECURE_COOKIES)
+  siffra-rs user-add --role superadmin|admin|user --name NOMBRE [--email E] [--username U]
+                     [--lang es|en|sv] [--password-env VAR] [--must-change]
+  siffra-rs user-reset LOGIN [--password-env VAR]     Cambia la contraseña de una cuenta
+  siffra-rs user-list                                 Lista las cuentas
+  siffra-rs backup DESTINO                            Copia consistente de la base de datos";
+
+/// Ejecuta un subcomando y devuelve `true` si lo era (entonces no se inicia el servidor).
+fn run_cli(args: &[String]) -> bool {
+    let Some(cmd) = args.first().map(String::as_str) else { return false };
+    let rest = &args[1..];
+    match cmd {
+        "user-add" => {
+            let db = open_db();
+            let role = flag(rest, "--role").and_then(|r| Role::from_code(&r)).unwrap_or_else(|| fail(USAGE));
+            let name = flag(rest, "--name").unwrap_or_else(|| fail(USAGE));
+            let (email, username) = (flag(rest, "--email"), flag(rest, "--username"));
+            if email.is_none() && username.is_none() {
+                fail("Indica --email o --username.");
+            }
+            let lang = flag(rest, "--lang").and_then(|l| Lang::from_code(&l)).unwrap_or(Lang::DEFAULT);
+            let (password, generated) = password_for_cli(rest);
+            if let Some(problem) = auth::password_problem(&password) {
+                fail(&format!("Contraseña no válida ({problem})."));
+            }
+            let new = NewUser {
+                email,
+                username,
+                name,
+                role,
+                active: true,
+                lang,
+                pass_hash: auth::hash_password(&password),
+                must_change: generated || rest.iter().any(|a| a == "--must-change"),
+                created_by: None,
+            };
+            match db.create_user(&new) {
+                Ok(id) => {
+                    println!("Usuario #{id} creado ({}).", role.code());
+                    if generated {
+                        println!("Contraseña temporal (se pedirá cambiarla al entrar): {password}");
+                    }
+                }
+                Err(e) => fail(&format!("No se pudo crear el usuario: {e:?}")),
+            }
+            true
+        }
+        "user-reset" => {
+            let db = open_db();
+            let login = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            let Some((user, _)) = db.user_by_login(&login) else { fail("No existe esa cuenta.") };
+            let (password, generated) = password_for_cli(rest);
+            if let Some(problem) = auth::password_problem(&password) {
+                fail(&format!("Contraseña no válida ({problem})."));
+            }
+            if db.set_password(user.id, &auth::hash_password(&password), generated).is_err() {
+                fail("No se pudo cambiar la contraseña.");
+            }
+            db.delete_user_sessions(user.id);
+            println!("Contraseña de {} actualizada; sus sesiones se cerraron.", user.label());
+            if generated {
+                println!("Contraseña temporal (se pedirá cambiarla al entrar): {password}");
+            }
+            true
+        }
+        "user-list" => {
+            for u in open_db().list_users("", None) {
+                println!("#{:<3} {:<10} {:<8} {:<34} {}", u.id, u.role.code(), if u.active { "activo" } else { "inactivo" }, u.label(), u.name);
+            }
+            true
+        }
+        "backup" => {
+            let dest = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            match open_db().backup_to(&dest) {
+                Ok(()) => println!("Copia guardada en {dest}"),
+                Err(e) => fail(&format!("No se pudo copiar: {e}")),
+            }
+            true
+        }
+        "help" | "--help" | "-h" => {
+            println!("{USAGE}");
+            true
+        }
+        _ => fail(USAGE),
+    }
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     load_dotenv();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if run_cli(&args) {
+        return Ok(());
+    }
+
     match bolagsverket::environment_host() {
         Some(host) if bolagsverket::configured() => println!("Bolagsverket: conectado a {host}"),
         _ => println!("Bolagsverket: sin credenciales (solo datos de EJEMPLO)"),
     }
+    let db = open_db();
+    if db.count_users() == 0 {
+        println!("AVISO: no hay cuentas. Crea la primera con: siffra-rs user-add --role superadmin --name \"Nombre\" --username admin");
+    }
+    let mut state = AppState::new(db.clone());
+    state.force_secure = std::env::var("SIFFRA_SECURE_COOKIES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+    // Limpieza periódica: sesiones caducadas y registro de actividad con más de un año.
+    tokio::spawn(async move {
+        loop {
+            db.prune(365);
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+
     // 3000 lo usa `npm run dev` del original; por defecto aquí 3001 para poder ejecutar ambos a la vez.
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3001);
+    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3001);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("Siffra (Rust) escuchando en http://localhost:{port}");
-    axum::serve(listener, app()).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::Body;
-    use axum::http::Request;
-    use http_body_util::BodyExt;
-    use tower::ServiceExt;
-
-    /// Los tests que dependen de las variables BOLAGSVERKET_* (globales del proceso) no pueden correr a la vez.
-    static BOLAGSVERKET_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_bolagsverket_env() -> std::sync::MutexGuard<'static, ()> {
-        BOLAGSVERKET_ENV.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    async fn get_path(path: &str) -> (StatusCode, Option<String>, String) {
-        // Las pruebas de rutas no deben depender de la red: SCB desactivado → medianas de EJEMPLO.
-        std::env::set_var("SCB_STATS_DISABLED", "1");
-        let res = app()
-            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = res.status();
-        let location = res
-            .headers()
-            .get(header::LOCATION)
-            .map(|v| v.to_str().unwrap().to_string());
-        let bytes = res.into_body().collect().await.unwrap().to_bytes();
-        (status, location, String::from_utf8(bytes.to_vec()).unwrap())
-    }
-
-    #[tokio::test]
-    async fn root_redirects_to_sok() {
-        let (status, location, _) = get_path("/").await;
-        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
-        assert_eq!(location.as_deref(), Some("/sok"));
-    }
-
-    #[tokio::test]
-    async fn sok_lists_three_example_companies() {
-        let (status, _, body) = get_path("/sok").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("<title>Sök företag — Siffra</title>"));
-        for name in ["Nordlys Logistik AB", "Fjällbruk Bygg &amp; Design AB", "Kvarn &amp; Krydda Livs AB"] {
-            assert!(body.contains(name), "falta {name}");
-        }
-        assert!(body.contains("Låg risk") && body.contains("Förhöjd risk") && body.contains("Bevaka"));
-        assert!(body.contains("EJEMPLO"));
-    }
-
-    #[tokio::test]
-    async fn sok_filters_by_query() {
-        let (_, _, body) = get_path("/sok?q=uppsala").await;
-        assert!(body.contains("Kvarn &amp; Krydda Livs AB"));
-        assert!(!body.contains("Nordlys Logistik AB"));
-        let (_, _, body) = get_path("/sok?q=zzz").await;
-        assert!(body.contains("Inga träffar"));
-    }
-
-    #[tokio::test]
-    async fn company_tabs_render() {
-        let (status, _, body) = get_path("/foretag/559108-7721").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Omsättning, 5 år (tkr)"));
-        let (_, _, body) = get_path("/foretag/559108-7721?tab=fin").await;
-        assert!(body.contains("Resultat efter finansiella poster"));
-        let (_, _, body) = get_path("/foretag/559108-7721?tab=ppl").await;
-        assert!(body.contains("Eva Testlund"));
-        let (_, _, body) = get_path("/foretag/559108-7721?tab=ai").await;
-        assert!(body.contains("Automatisk sammanfattning"));
-    }
-
-    #[tokio::test]
-    async fn overview_falls_back_to_example_medians_without_scb() {
-        let (_, _, body) = get_path("/foretag/559012-3456").await;
-        assert!(body.contains("Strecket visar medianen för SNI 52.290."));
-        assert!(!body.contains("Källa: SCB"));
-    }
-
-    #[tokio::test]
-    async fn unknown_company_is_404() {
-        // Sin claves de Bolagsverket no se consulta a nadie: un número desconocido es 404.
-        let _env = lock_bolagsverket_env();
-        let (status, _, body) = get_path("/foretag/000000-0000").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert!(body.contains("Företaget hittades inte"));
-    }
-
-    #[tokio::test]
-    async fn static_pages_render() {
-        for (path, needle) in [
-            ("/bevakning", "Mail varje måndag"),
-            ("/likviditet", "Kassan kommer nära <strong>130 tkr</strong> i vecka 12."),
-            ("/sie", "Släpp en SIE-fil här"),
-            ("/fakturor", "Hamnkraft Test AB"),
-        ] {
-            let (status, _, body) = get_path(path).await;
-            assert_eq!(status, StatusCode::OK, "{path}");
-            assert!(body.contains(needle), "{path} no contiene {needle:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn sok_sorts_by_revenue_and_marks_aria_sort() {
-        // Solo dentro de la tabla (el placeholder del buscador también menciona "Nordlys").
-        let pos = |body: &str, name: &str| {
-            let table = &body[body.find("<tbody").expect("tbody")..];
-            table.find(name).unwrap_or_else(|| panic!("falta {name}"))
-        };
-        let (_, _, asc) = get_path("/sok?sort=revenue&dir=asc").await;
-        assert!(pos(&asc, "Kvarn") < pos(&asc, "Nordlys") && pos(&asc, "Nordlys") < pos(&asc, "Fjällbruk"));
-        assert!(asc.contains(r#"aria-sort="ascending""#));
-        let (_, _, desc) = get_path("/sok?sort=revenue&dir=desc").await;
-        assert!(pos(&desc, "Fjällbruk") < pos(&desc, "Nordlys") && pos(&desc, "Nordlys") < pos(&desc, "Kvarn"));
-        assert!(desc.contains(r#"aria-sort="descending""#));
-        // Una columna desconocida se ignora (orden original).
-        let (_, _, other) = get_path("/sok?sort=nope").await;
-        assert!(!other.contains(r#"aria-sort=""#));
-    }
-
-    #[tokio::test]
-    async fn pages_have_accessible_structure() {
-        let (_, _, body) = get_path("/sok").await;
-        assert!(body.contains(r##"href="#main""##), "enlace para saltar al contenido");
-        assert_eq!(body.matches("<h1").count(), 1, "un único h1");
-        assert!(body.contains(r#"aria-label="Huvudmeny""#));
-        assert!(body.contains(r#"aria-current="page""#));
-        // La navegación solo marca la página actual; las demás no llevan aria-current="false".
-        assert!(!body.contains(r#"aria-current="false""#));
-        // La ficha cuenta como parte de "Sök företag" y las pestañas son navegación, no role=tab.
-        let (_, _, co) = get_path("/foretag/559012-3456?tab=fin").await;
-        assert!(co.contains(r#"aria-label="Företagsvyer""#));
-        assert!(!co.contains(r#"role="tab""#));
-        assert!(co.contains("<caption"));
-    }
-
-    #[tokio::test]
-    async fn benchmark_fragment_route() {
-        let (status, _, body) = get_path("/foretag/559108-7721/benchmarks").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Vinstmarginal") && body.contains("Kassalikviditet"));
-        assert!(!body.contains("<html"), "es un fragmento, no un documento");
-        let (status, _, _) = get_path("/foretag/000000-0000/benchmarks").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    /// Flujo completo contra un Bolagsverket SIMULADO en local (OAuth + `/organisationer` con la forma del
-    /// ejemplo oficial). No toca la red real. Un solo test porque modifica variables de entorno.
-    #[tokio::test]
-    async fn live_bolagsverket_flow_with_fake_api() {
-        use axum::{http::HeaderMap, routing::post, Form, Json};
-        use serde_json::{json, Value};
-        use std::collections::HashMap;
-
-        let _env = lock_bolagsverket_env();
-
-        async fn fake_token(Form(f): Form<HashMap<String, String>>) -> Response {
-            let ok = f.get("grant_type").map(String::as_str) == Some("client_credentials")
-                && f.get("client_id").map(String::as_str) == Some("test-id")
-                && f.get("client_secret").map(String::as_str) == Some("test-secret")
-                && f.get("scope").map(String::as_str) == Some("vardefulla-datamangder:read");
-            if !ok {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Json(json!({ "access_token": "tok-123", "expires_in": 3600 })).into_response()
-        }
-        async fn fake_orgs(headers: HeaderMap, Json(body): Json<Value>) -> Response {
-            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer tok-123") {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            let raw = match body["identitetsbeteckning"].as_str() {
-                Some("5299999994") => bolagsverket::fixtures::AKTIEBOLAG,
-                Some("5560000019") => bolagsverket::fixtures::KALLA_OTILLGANGLIG,
-                Some("5560000027") => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                _ => bolagsverket::fixtures::FINNS_EJ,
-            };
-            Json(serde_json::from_str::<Value>(raw).unwrap()).into_response()
-        }
-
-        fn authorised(headers: &HeaderMap) -> bool {
-            headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer tok-123")
-        }
-        // Lista de cuentas anuales: dos informes (2025 y 2023) para 5299999994; ninguno para el resto.
-        async fn fake_dokumentlista(headers: HeaderMap, Json(body): Json<Value>) -> Response {
-            if !authorised(&headers) {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            let docs = if body["identitetsbeteckning"].as_str() == Some("5299999994") {
-                json!([
-                    {"dokumentId": "doc-2025", "filformat": "application/zip", "rapporteringsperiodTom": "2025-12-31", "registreringstidpunkt": "2026-07-01"},
-                    {"dokumentId": "doc-2024", "filformat": "application/zip", "rapporteringsperiodTom": "2024-12-31", "registreringstidpunkt": "2025-07-01"},
-                    {"dokumentId": "doc-2023", "filformat": "application/zip", "rapporteringsperiodTom": "2023-12-31", "registreringstidpunkt": "2024-07-01"}
-                ])
-            } else {
-                json!([])
-            };
-            Json(json!({ "dokument": docs })).into_response()
-        }
-        // Cada documento es un ZIP real con un informe iXBRL (sintético, con la estructura observada en producción).
-        async fn fake_dokument(headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
-            use std::io::Write;
-            if !authorised(&headers) {
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            let year = match id.as_str() {
-                "doc-2025" => 2025,
-                "doc-2023" => 2023,
-                _ => return StatusCode::NOT_FOUND.into_response(),
-            };
-            let xhtml = annual_report::tests::report_xml(year, 1_000_000);
-            let mut buf = std::io::Cursor::new(Vec::new());
-            {
-                let mut w = zip::ZipWriter::new(&mut buf);
-                let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-                w.start_file("informe.xhtml", opts).unwrap();
-                w.write_all(xhtml.as_bytes()).unwrap();
-                w.finish().unwrap();
-            }
-            ([(header::CONTENT_TYPE, "application/zip")], buf.into_inner()).into_response()
-        }
-
-        let fake = Router::new()
-            .route("/oauth2/token", post(fake_token))
-            .route("/vardefulla-datamangder/v1/organisationer", post(fake_orgs))
-            .route("/vardefulla-datamangder/v1/dokumentlista", post(fake_dokumentlista))
-            .route("/vardefulla-datamangder/v1/dokument/:id", get(fake_dokument));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
-
-        std::env::set_var("BOLAGSVERKET_CLIENT_ID", "test-id");
-        std::env::set_var("BOLAGSVERKET_CLIENT_SECRET", "test-secret");
-        std::env::set_var("BOLAGSVERKET_BASE_URL", format!("http://{addr}/vardefulla-datamangder/v1"));
-
-        let (status, _, body) = get_path("/foretag/5299999994").await;
-        assert_eq!(status, StatusCode::OK);
-        for needle in [
-            "Cykelbolaget AB",
-            "529999-9994",
-            "Avregistrerad 2023-05-05",
-            "Konkurs (sedan 2024-01-26)",
-            "Jobbstigen 2, 12345 Grönköping",
-            "Bedriva handel med cyklar och tillbehör till cyklar",
-            "Bolagsverket, värdefulla datamängder (live)",
-        ] {
-            assert!(body.contains(needle), "la ficha real no contiene {needle:?}");
-        }
-        // Cuentas anuales: la ficha sale al instante con un esqueleto y el fragmento trae las cifras reales.
-        assert!(body.contains(r#"data-fragment="/foretag/5299999994/bokslut""#), "esqueleto de carga diferida");
-        let (status, _, frag) = get_path("/foretag/5299999994/bokslut").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(!frag.contains("<html"), "es un fragmento");
-        for needle in [
-            "Omsättning 2025",
-            "1\u{00A0}002 tkr", // 1 002 025 coronas → 1 002 tkr (gana el hecho exacto, no el redondeado)
-            "−46 tkr",          // resultado 2025: −45 678 coronas, con sign=\"-\"
-            "Soliditet",
-            "33.3 %",           // 300 / 900
-            "Eget kapital",
-            "Summa tillgångar",
-            "Räkenskapsåret slutar 2025-12-31",
-        ] {
-            assert!(frag.contains(needle), "el fragmento no contiene {needle:?}");
-        }
-        // Se leen informes alternos (2025 y 2023) y se unen: 2022..2025 → cuatro años en la tabla.
-        for year in ["2022", "2023", "2024", "2025"] {
-            assert!(frag.contains(&format!("<th class=\"right\" scope=\"col\">{year}</th>")), "falta la columna {year}");
-        }
-        // Con las cifras ya en caché, la ficha las incluye directamente (sin esqueleto).
-        let (_, _, again) = get_path("/foretag/5299999994").await;
-        assert!(!again.contains("data-fragment"), "ya en caché: sin carga diferida");
-        assert!(again.contains("Omsättning 2025") && again.contains("Bokslut"));
-        // Una empresa real sin cuentas digitales: mensaje claro en vez de cifras.
-        assert!(views::financials_fragment(None).into_string().contains("Inga digitalt inlämnade årsredovisningar"));
-        // Una de EJEMPLO no pasa por este fragmento.
-        assert_eq!(get_path("/foretag/559012-3456/bokslut").await.0, StatusCode::NOT_FOUND);
-        // Buscador: un organisationsnummer real que no es de ejemplo.
-        let (_, _, sok) = get_path("/sok?q=529999-9994").await;
-        assert!(sok.contains("Cykelbolaget AB") && sok.contains("Bolagsverket"));
-        assert!(sok.contains("1 träff"));
-        // No existe → 404; fuente de datos caída o error HTTP del API → 502 con página de error.
-        assert_eq!(get_path("/foretag/5560000001").await.0, StatusCode::NOT_FOUND);
-        // Dígito de control inválido: se rechaza antes de llamar a la API (404, no 502).
-        assert_eq!(get_path("/foretag/5560000009").await.0, StatusCode::NOT_FOUND);
-        assert_eq!(get_path("/foretag/5560000019").await.0, StatusCode::BAD_GATEWAY);
-        assert_eq!(get_path("/foretag/5560000027").await.0, StatusCode::BAD_GATEWAY);
-        // Un personnummer (12 dígitos) nunca se envía al API.
-        assert_eq!(get_path("/foretag/194009272719").await.0, StatusCode::NOT_FOUND);
-        // Las empresas de EJEMPLO siguen sirviéndose igual.
-        assert_eq!(get_path("/foretag/559012-3456").await.0, StatusCode::OK);
-
-        std::env::remove_var("BOLAGSVERKET_CLIENT_ID");
-        std::env::remove_var("BOLAGSVERKET_CLIENT_SECRET");
-        std::env::remove_var("BOLAGSVERKET_BASE_URL");
-    }
-
-    #[tokio::test]
-    async fn interactive_elements_expose_tooltips() {
-        // Gráfico de ingresos: 5 barras enfocables, cada una con su tooltip (y variación respecto al año anterior).
-        let (_, _, co) = get_path("/foretag/559108-7721").await;
-        assert_eq!(co.matches(r#"class="bar-group""#).count(), 5);
-        assert!(co.contains("mot 2023"), "la barra de 2024 compara con 2023");
-        assert!(co.contains(r#"data-copy="559108-7721""#), "botón de copiar el organisationsnummer");
-        assert!(co.contains(r#"class="term""#) && co.contains("Soliditet"));
-        assert!(co.contains(r#"class="info""#));
-        // Cada barra enfocable lleva el mismo texto en aria-label y data-tip (accesible sin ratón).
-        assert_eq!(co.matches(r#"tabindex="0""#).count(), 5 + 3,
-            "5 barras + 3 pistas de comparación con el sector, todas alcanzables con Tab");
-        // Gráfico de caja: 13 semanas + la línea de gráns.
-        let (_, _, cash) = get_path("/likviditet").await;
-        assert_eq!(cash.matches(r#"class="bar-group""#).count(), 13);
-        assert!(cash.contains("under gränsen"));
-        assert!(cash.contains(r#"class="threshold-group""#));
-        // Buscador: cabeceras con pista de orden y atajo "/".
-        let (_, _, sok) = get_path("/sok").await;
-        assert!(sok.contains("Sortera stigande efter företag"));
-        assert!(sok.contains("<kbd>/</kbd>"));
-        // Los tooltips no deben duplicarse con title nativo.
-        assert!(!sok.contains(" title="));
-    }
-
-    #[test]
-    fn pending_benchmark_renders_skeleton_with_fragment_url() {
-        let html = views::company_page(&model::EXAMPLE_COMPANIES[0], "ov", &views::Bench::Pending).into_string();
-        assert!(html.contains(r#"data-fragment="/foretag/559012-3456/benchmarks""#));
-        assert!(html.contains(r#"aria-busy="true""#));
-        assert!(html.contains("skeleton-row"));
-        assert!(html.contains("<noscript>"));
-    }
-
-    #[tokio::test]
-    async fn serves_stylesheet() {
-        let (status, _, body) = get_path("/static/styles.css").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("--accent: #0b6e75"));
-    }
+    axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await
 }
