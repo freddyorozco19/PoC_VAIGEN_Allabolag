@@ -11,8 +11,18 @@ llamada de red por rama/tamaño y se cachea 24 h. Con `SCB_STATS_DISABLED=1` se 
 `BOLAGSVERKET_CLIENT_ID`, `BOLAGSVERKET_CLIENT_SECRET`, `BOLAGSVERKET_BASE_URL` (test: `gw-accept2…`, producción: `gw…`;
 el token se deduce de la URL base). Con claves, `/foretag/<organisationsnummer>` y el buscador muestran la empresa real
 (nombre, dirección, SNI, estado, konkurs/likvidation); sin claves, solo los datos de EJEMPLO. El API no busca por
-nombre y no incluye cifras financieras: esas siguen siendo de EJEMPLO. Se valida el dígito de control (Luhn) antes
-de llamar, se cachea 10 min y se rechazan los identificadores de 12 dígitos (personnummer).
+nombre. Se valida el dígito de control (Luhn) antes de llamar, se cachea 10 min y se rechazan los identificadores
+de 12 dígitos (personnummer).
+
+**Cifras financieras reales (cuentas anuales):** `src/annual_report.rs` lista los documentos (`/dokumentlista`),
+descarga hasta 3 informes (`/dokument/{id}`, un ZIP con iXBRL), los lee y los une para mostrar hasta 5 ejercicios de
+omsättning, resultado, eget kapital y tillgångar (en tkr), con soliditet y margen calculados. La ficha sale al
+instante y las cifras llegan en segundo plano (`/foretag/<org>/bokslut`). Detalles aprendidos de informes reales:
+cifras en coronas y también en miles redondeadas (se usa la más precisa), signo en `sign="-"`, ejercicios que no
+son año natural, empresas sin facturación (se muestra "—", no 0). Solo hay cuentas para empresas que presentan en
+digital (K2/K3/ESEF; sobre todo pymes): para las demás (p.ej. muchas grandes) la ficha lo dice. Las 3 empresas de
+EJEMPLO siguen con cifras ficticias.
+Prueba contra informes reales ya descargados: `SIFFRA_SAMPLE_REPORTS=<carpeta con x_*> cargo test real_reports_parse -- --ignored`.
 Prueba contra el entorno real: `cargo test live_bolagsverket_lookup -- --ignored --nocapture`.
 
 ## Ejecutar

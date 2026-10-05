@@ -2,8 +2,9 @@
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
+use crate::annual_report::Financials;
 use crate::bolagsverket::Organisation;
-use crate::format::{format_int, format_tkr, js_round};
+use crate::format::{format_int, format_tkr, js_round, percent1};
 use crate::model::*;
 use crate::scb::SectorMedians;
 use crate::summary::generate_example_summary;
@@ -350,16 +351,36 @@ pub fn benchmark_fragment(company: &Company, medians: Option<&SectorMedians>, no
     }
 }
 
-/// Gráfico de barras SVG de la omsättning de 5 años, con etiqueta de valor en cada barra.
+/// Paso "redondo" (1, 2, 2.5, 5 × 10^k) mayor o igual que `x`, para que el eje salga con cifras limpias.
+fn nice_step(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 1.0;
+    }
+    let pow = 10f64.powf(x.log10().floor());
+    [1.0, 2.0, 2.5, 5.0, 10.0].iter().map(|m| m * pow).find(|s| *s >= x * 0.999_999).unwrap_or(10.0 * pow)
+}
+
+/// Gráfico de barras SVG de la omsättning de 5 años (datos de ejemplo).
 fn revenue_chart(revenue: &FiveYearSeries) -> Markup {
+    bar_chart(&FINANCIAL_YEARS, revenue)
+}
+
+/// Gráfico de barras SVG de la omsättning con etiqueta de valor en cada barra, tooltips y eje adaptable
+/// (millones de coronas: mkr; cifras pequeñas: tkr). `labels` y `values` tienen la misma longitud.
+fn bar_chart(labels: &[&str], values: &[i64]) -> Markup {
+    let n = values.len().min(labels.len());
+    if n == 0 {
+        return html! {};
+    }
+    let (labels, values) = (&labels[..n], &values[..n]);
     let (w, h) = (360.0_f64, 230.0_f64);
     let (pl, pb, pt, pr) = (50.0_f64, 28.0_f64, 22.0_f64, 6.0_f64);
-    let max = *revenue.iter().max().unwrap_or(&0) as f64;
-    let top = {
-        let t = (max / 20000.0).ceil() * 20000.0;
-        if t == 0.0 { 20000.0 } else { t }
-    };
-    let bw = (w - pl - pr) / 5.0;
+    let max = values.iter().copied().max().unwrap_or(0).max(0) as f64;
+    let top = 4.0 * nice_step((max / 4.0).max(1.0));
+    let in_mkr = top >= 5000.0;
+    let axis_label = |v: f64| if in_mkr { format!("{} mkr", v / 1000.0) } else { format!("{} tkr", v) };
+    let bar_label = |v: i64| if in_mkr { mkr(v as f64) } else { format_tkr(v) };
+    let bw = (w - pl - pr) / n as f64;
 
     let grid_lines: Vec<(f64, f64)> = (0..5)
         .map(|i| {
@@ -369,43 +390,45 @@ fn revenue_chart(revenue: &FiveYearSeries) -> Markup {
         })
         .collect();
 
-    let desc = revenue
+    let desc = labels
         .iter()
-        .enumerate()
-        .map(|(i, v)| format!("{}: {} tkr", FINANCIAL_YEARS[i], format_tkr(*v)))
+        .zip(values)
+        .map(|(l, v)| format!("{l}: {} tkr", format_tkr(*v)))
         .collect::<Vec<_>>()
         .join(", ");
 
     html! {
         svg.chart viewBox=(format!("0 0 {} {}", w, h)) role="group" aria-labelledby="rc-title rc-desc" {
-            title #rc-title { "Omsättning, fem år (tkr)" }
+            title #rc-title { "Omsättning per år (tkr)" }
             desc #rc-desc { (desc) }
             @for (value, y) in grid_lines.iter() {
                 g {
                     line x1=(pl) x2=(w - pr) y1=(y) y2=(y) stroke="var(--line)" stroke-width="1" {}
-                    text x=(pl - 8.0) y=(y + 4.0) text-anchor="end" { (value / 1000.0) " mkr" }
+                    text x=(pl - 8.0) y=(y + 4.0) text-anchor="end" { (axis_label(*value)) }
                 }
             }
-            @for (i, v) in revenue.iter().enumerate() {
-                @let v = *v as f64;
-                @let bar_h = (h - pb - pt) * v / top;
+            @for i in 0..n {
+                @let v = values[i];
+                @let vf = v.max(0) as f64;
+                @let bar_h = (h - pb - pt) * vf / top;
                 @let x = pl + i as f64 * bw + bw * 0.18;
                 @let bar_w = bw * 0.64;
                 @let y = h - pb - bar_h;
-                @let is_last = i == revenue.len() - 1;
-                @let change = if i > 0 { Some((v / revenue[i - 1] as f64 - 1.0) * 100.0) } else { None };
-                @let tip = match change {
-                    Some(c) => format!("{}: {} tkr · {}{:.1} % mot {}", FINANCIAL_YEARS[i], format_tkr(v as i64),
-                        if c >= 0.0 { "+" } else { "−" }, c.abs(), FINANCIAL_YEARS[i - 1]),
-                    None => format!("{}: {} tkr", FINANCIAL_YEARS[i], format_tkr(v as i64)),
+                @let is_last = i == n - 1;
+                @let tip = if i > 0 && values[i - 1] > 0 {
+                    let c = (v as f64 / values[i - 1] as f64 - 1.0) * 100.0;
+                    format!("{}: {} tkr · {}{:.1} % mot {}", labels[i], format_tkr(v),
+                        if c >= 0.0 { "+" } else { "−" }, c.abs(), labels[i - 1])
+                } else {
+                    format!("{}: {} tkr", labels[i], format_tkr(v))
                 };
                 g.bar-group tabindex="0" role="img" aria-label=(tip) data-tip=(tip) {
                     rect.hit x=(pl + i as f64 * bw) y=(pt) width=(bw) height=(h - pb - pt) fill="transparent" {}
                     rect.bar x=(x) y=(y) width=(bar_w) height=(bar_h) rx="2"
                         fill=(if is_last { "var(--bar)" } else { "var(--bar2)" }) {}
-                    text x=(x + bar_w / 2.0) y=(h - 9.0) text-anchor="middle" { (FINANCIAL_YEARS[i]) }
+                    text x=(x + bar_w / 2.0) y=(h - 9.0) text-anchor="middle" { (labels[i]) }
                     text.value-label.strong[is_last] x=(x + bar_w / 2.0) y=(y - 6.0) text-anchor="middle" {
-                        (mkr(v))
+                        (bar_label(v))
                     }
                 }
             }
@@ -721,7 +744,7 @@ pub enum Bench {
     Pending,
 }
 
-const BENCH_SCRIPT: &str = r#"(function(){var c=document.getElementById('bench-body');if(!c)return;var u=c.getAttribute('data-fragment');
+const BENCH_SCRIPT: &str = r#"(function(){var c=document.querySelector('[data-fragment]');if(!c)return;var u=c.getAttribute('data-fragment');
 function fail(){c.removeAttribute('aria-busy');var s=c.querySelectorAll('.skeleton-row');for(var i=0;i<s.length;i++)s[i].hidden=true;var e=c.querySelector('.bench-error');if(e)e.hidden=false;}
 fetch(u,{headers:{'Accept':'text/html'}}).then(function(r){if(!r.ok)throw 0;return r.text();}).then(function(h){c.innerHTML=h;c.removeAttribute('aria-busy');}).catch(fail);})();"#;
 
@@ -766,8 +789,8 @@ pub fn company_page(company: &Company, tab: &str, bench: &Bench) -> Markup {
                     if growth >= 0.0 { "up" } else { "down" }))
                 (kpi("Resultat", "Resultat efter finansiella poster, i tusen kronor (tkr).",
                     &format!("{} tkr", format_tkr(f.result[4])), f.result[4] < 0,
-                    html! { (format!("Vinstmarginal {:.1} %", margin)) }, ""))
-                (kpi("Soliditet", TIP_SOLIDITET, &format!("{:.1} %", solidity), false,
+                    html! { (format!("Vinstmarginal {}", percent1(margin))) }, ""))
+                (kpi("Soliditet", TIP_SOLIDITET, &percent1(solidity), false,
                     html! { (format!("Eget kapital {} tkr", format_tkr(f.equity[4]))) }, ""))
                 (kpi("Anställda", "Antal anställda enligt SCB, angivet som intervall.",
                     company.employee_range, false, html! { "SCB, intervall" }, ""))
@@ -946,7 +969,7 @@ fn summary(company: &Company) -> Markup {
 
 /// Ficha con datos REALES de Bolagsverket (API gratuito). Solo hay datos básicos: las cifras
 /// financieras, personas y riesgo requieren otras fuentes y todavía no están conectadas.
-pub fn live_profile_page(o: &Organisation) -> Markup {
+pub fn live_profile_page(o: &Organisation, fin: &FinState) -> Markup {
     let address = [o.gatuadress.clone(), Some([o.postnummer.clone(), o.postort.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "))]
         .into_iter()
         .flatten()
@@ -1005,11 +1028,125 @@ pub fn live_profile_page(o: &Organisation) -> Markup {
                     dt { "Verksamhet" } dd { (o.verksamhetsbeskrivning.clone().unwrap_or_else(|| "—".to_string())) }
                 }
             }
+            div.card.mt-4 {
+                h2.card-title {
+                    "Bokslut"
+                    (info_btn("Om bokslutet", "Siffrorna läses ur bolagets digitalt inlämnade årsredovisningar hos Bolagsverket (iXBRL) och visas i tusen kronor (tkr), avrundade från kronor."))
+                }
+                @match fin {
+                    FinState::Pending => {
+                        div #fin-body aria-busy="true" data-fragment=(format!("/foretag/{}/bokslut", o.organisationsnummer)) {
+                            (sr("Hämtar årsredovisningar från Bolagsverket…"))
+                            @for _ in 0..4 {
+                                div.skeleton-row aria-hidden="true" { div.skeleton-line {} div.skeleton-bar {} }
+                            }
+                            p.bench-error hidden { "Kunde inte hämta årsredovisningarna just nu. Ladda om sidan för att försöka igen." }
+                        }
+                        script { (PreEscaped(BENCH_SCRIPT)) }
+                    }
+                    FinState::Ready(f) => { div #fin-body { (financials_fragment(f.as_ref())) } }
+                }
+            }
             p.note {
-                "Källa: Bolagsverket, värdefulla datamängder (live). Omsättning, resultat, personer och riskbedömning visas inte här — de kräver årsredovisningar och andra källor som ännu inte är kopplade."
+                "Källa: Bolagsverket, värdefulla datamängder (live). Personer och riskbedömning visas inte här — de kräver andra källor som ännu inte är kopplade."
             }
         },
     )
+}
+
+/// Estado de la sección "Bokslut" de una ficha real al renderizar: ya en caché, o pendiente de descargar.
+pub enum FinState {
+    Ready(Option<Financials>),
+    Pending,
+}
+
+/// Cifras reales de las cuentas anuales: resumen del último año, gráfico de facturación y tabla.
+/// `None` = la empresa no ha presentado cuentas anuales digitales.
+pub fn financials_fragment(fin: Option<&Financials>) -> Markup {
+    let Some(fin) = fin.filter(|f| f.latest().is_some()) else {
+        return html! {
+            p.muted { "Inga digitalt inlämnade årsredovisningar hittades för det här bolaget." }
+            p.note {
+                "Det gäller till exempel bolag som lämnat in på papper och många större bolag. Siffror visas bara när årsredovisningen finns i digitalt format (K2, K3 eller ESEF) hos Bolagsverket."
+            }
+        };
+    };
+    let latest = fin.latest().expect("comprobado arriba");
+    let money = |v: Option<i64>| v.map(|n| format!("{} tkr", format_tkr(n))).unwrap_or_else(|| "—".to_string());
+    let chart: Vec<(&str, i64)> = fin.years.iter().filter_map(|y| y.revenue.map(|r| (y.label.as_str(), r))).collect();
+    let has_revenue = chart.iter().any(|(_, v)| *v > 0);
+    let (chart_labels, chart_values): (Vec<&str>, Vec<i64>) = chart.into_iter().unzip();
+    let rows: [(&str, Vec<Option<i64>>); 4] = [
+        ("Omsättning", fin.years.iter().map(|y| y.revenue).collect()),
+        ("Resultat efter finansiella poster", fin.years.iter().map(|y| y.result).collect()),
+        ("Eget kapital", fin.years.iter().map(|y| y.equity).collect()),
+        ("Summa tillgångar", fin.years.iter().map(|y| y.assets).collect()),
+    ];
+    html! {
+        dl.stats {
+            div.stat {
+                dt { "Omsättning " (latest.label) }
+                dd {
+                    (money(latest.revenue))
+                    @if let (Some(now), Some(before)) = (latest.revenue, fin.previous().and_then(|p| p.revenue)) {
+                        @if before > 0 {
+                            @let change = (now as f64 / before as f64 - 1.0) * 100.0;
+                            span.sub.up[change >= 0.0].down[change < 0.0] {
+                                (icon_sized(if change >= 0.0 { "arrow-up-right" } else { "arrow-down-right" }, "icon-sm"))
+                                (sr(if change >= 0.0 { "Ökning " } else { "Minskning " }))
+                                (format!("{:.1} % mot {}", change.abs(), fin.previous().map(|p| p.label.as_str()).unwrap_or("")))
+                            }
+                        }
+                    }
+                }
+            }
+            div.stat {
+                dt { "Resultat" }
+                dd.neg[latest.result.is_some_and(|r| r < 0)] {
+                    (money(latest.result))
+                    @if let Some(m) = latest.margin() { span.sub { (term("Vinstmarginal", TIP_MARGIN)) " " (percent1(m)) } }
+                }
+            }
+            div.stat { dt { "Eget kapital" } dd.neg[latest.equity.is_some_and(|e| e < 0)] { (money(latest.equity)) } }
+            div.stat {
+                dt { (term("Soliditet", TIP_SOLIDITET)) }
+                dd { (latest.solidity().map(percent1).unwrap_or_else(|| "—".to_string())) }
+            }
+        }
+        @if has_revenue {
+            (bar_chart(&chart_labels, &chart_values))
+        } @else {
+            p.muted { "Ingen omsättning redovisad i årsredovisningarna." }
+        }
+        div.table-wrap.mt-3 {
+            table.fin-table {
+                caption.sr-only { "Bokslut, tkr" }
+                thead {
+                    tr {
+                        th scope="col" { "tkr" }
+                        @for y in fin.years.iter() { th.right scope="col" { (y.label) } }
+                    }
+                }
+                tbody {
+                    @for (label, values) in rows.iter() {
+                        tr {
+                            th scope="row" { (label) }
+                            @for v in values.iter() {
+                                @match v {
+                                    Some(n) => { td.right.num.mono.neg[*n < 0] { (format_tkr(*n)) } }
+                                    None => { td.right.num.mono.muted { "—" } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p.note {
+            "Källa: digitalt inlämnade årsredovisningar (iXBRL), Bolagsverket. Räkenskapsåret slutar " (latest.period_end)
+            ". Belopp i tkr, avrundade från kronor; “—” betyder att uppgiften saknas i årsredovisningen."
+        }
+    }
 }
 
 pub fn live_error_page() -> Markup {

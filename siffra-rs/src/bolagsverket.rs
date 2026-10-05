@@ -245,6 +245,117 @@ pub async fn get_organisation_by_number(input: &str) -> Result<Organisation, BvE
     remember(id.clone(), map_organisation(&raw, &id))
 }
 
+// ───────────── Cuentas anuales: lista y descarga (`/dokumentlista`, `/dokument/{id}`) ─────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocRef {
+    pub id: String,
+    /// Fin del ejercicio, "AAAA-MM-DD".
+    pub period_end: String,
+    /// Fecha de registro, "AAAA-MM-DD" (puede ir vacía).
+    pub registered: String,
+}
+
+const MAX_DOCUMENT_BYTES: usize = 15 * 1024 * 1024;
+
+async fn auth() -> Result<(Config, String), BvError> {
+    let config = load_config().ok_or_else(|| {
+        upstream(None, "Bolagsverket: faltan BOLAGSVERKET_CLIENT_ID / BOLAGSVERKET_CLIENT_SECRET / BOLAGSVERKET_BASE_URL (ver .env.example).")
+    })?;
+    let token = access_token(&config).await?;
+    Ok((config, token))
+}
+
+/// Convierte una respuesta HTTP no exitosa en un `BvError` con un mensaje útil (sin credenciales).
+async fn ensure_ok(res: reqwest::Response, what: &str) -> Result<reqwest::Response, BvError> {
+    let s = res.status().as_u16();
+    if (200..300).contains(&s) {
+        return Ok(res);
+    }
+    if s == 401 {
+        *TOKEN.lock().unwrap() = None;
+    }
+    let body = res.text().await.unwrap_or_default();
+    let detail: String = body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
+    Err(upstream(
+        Some(s),
+        match s {
+            401 => "Bolagsverket: token rechazado (401). Reintenta.".to_string(),
+            403 => "Bolagsverket: acceso denegado (403). Comprueba que las credenciales son del entorno correcto.".to_string(),
+            429 => "Bolagsverket: límite de 60 peticiones/minuto superado.".to_string(),
+            _ => format!("Bolagsverket: error HTTP {s} al consultar {what}. {detail}").trim_end().to_string(),
+        },
+    ))
+}
+
+/// Cuentas anuales digitales (K2/K3/ESEF) disponibles de una organización. Vacío si no presenta en digital.
+pub async fn list_documents(input: &str) -> Result<Vec<DocRef>, BvError> {
+    let id = normalize_org_number(input)
+        .filter(|n| luhn_valid(n))
+        .ok_or_else(|| BvError::Invalid(format!("Bolagsverket: \"{input}\" no es un organisationsnummer válido.")))?;
+    let (config, token) = auth().await?;
+    let res = CLIENT
+        .post(format!("{}/dokumentlista", config.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "application/json")
+        .json(&json!({ "identitetsbeteckning": id }))
+        .send()
+        .await
+        .map_err(|e| upstream(None, format!("Bolagsverket: no se pudo consultar la lista de documentos de {id}: {e}")))?;
+    let raw: Value = ensure_ok(res, &id)
+        .await?
+        .json()
+        .await
+        .map_err(|e| upstream(None, format!("Bolagsverket: respuesta no válida: {e}")))?;
+    Ok(parse_document_list(&raw))
+}
+
+pub fn parse_document_list(raw: &Value) -> Vec<DocRef> {
+    raw.get("dokument")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| {
+                    Some(DocRef {
+                        id: s(d.get("dokumentId"))?,
+                        period_end: d.get("rapporteringsperiodTom").and_then(to_iso_date)?,
+                        registered: d.get("registreringstidpunkt").and_then(to_iso_date).unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Los identificadores reales tienen la forma `<uuid>_<sufijo>` (42 caracteres, con guion y guion bajo). Se
+/// restringe el alfabeto porque el valor se inserta en la ruta de la petición.
+pub fn valid_document_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Descarga un documento (ZIP con el informe iXBRL). Máximo 15 MB.
+pub async fn download_document(doc_id: &str) -> Result<Vec<u8>, BvError> {
+    if !valid_document_id(doc_id) {
+        return Err(BvError::Invalid(format!("Bolagsverket: identificador de documento no válido ({} caracteres).", doc_id.len())));
+    }
+    let (config, token) = auth().await?;
+    let res = CLIENT
+        .get(format!("{}/dokument/{doc_id}", config.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| upstream(None, format!("Bolagsverket: no se pudo descargar el documento: {e}")))?;
+    let res = ensure_ok(res, "el documento").await?;
+    if res.content_length().is_some_and(|n| n as usize > MAX_DOCUMENT_BYTES) {
+        return Err(upstream(None, "Bolagsverket: el documento supera el tamaño máximo admitido (15 MB)."));
+    }
+    let bytes = res.bytes().await.map_err(|e| upstream(None, format!("Bolagsverket: descarga interrumpida: {e}")))?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err(upstream(None, "Bolagsverket: el documento supera el tamaño máximo admitido (15 MB)."));
+    }
+    Ok(bytes.to_vec())
+}
+
 /// Guarda en caché los resultados definitivos (encontrada / no existe); los errores transitorios no.
 fn remember(id: String, result: Result<Organisation, BvError>) -> Result<Organisation, BvError> {
     match result {
@@ -495,6 +606,17 @@ mod tests {
         assert_eq!(default_token_url("https://gw.api.bolagsverket.se/vardefulla-datamangder/v1"), "https://portal.api.bolagsverket.se/oauth2/token");
         assert_eq!(default_token_url("https://gw-accept2.api.bolagsverket.se/vardefulla-datamangder/v1"), "https://portal-accept2.api.bolagsverket.se/oauth2/token");
         assert_eq!(default_token_url("http://127.0.0.1:4010/vardefulla-datamangder/v1"), "http://127.0.0.1:4010/oauth2/token");
+    }
+
+    #[test]
+    fn document_ids_have_the_real_shape_and_cannot_escape_the_path() {
+        assert!(valid_document_id("8a35458e-d80b-4ecf-ba2c-86d263fbf95b_aaaaa"), "forma real: uuid_sufijo");
+        assert!(valid_document_id("doc-2025"));
+        assert!(!valid_document_id(""));
+        assert!(!valid_document_id("../organisationer"));
+        assert!(!valid_document_id("a/b"));
+        assert!(!valid_document_id("a b"));
+        assert!(!valid_document_id(&"a".repeat(101)));
     }
 
     #[test]

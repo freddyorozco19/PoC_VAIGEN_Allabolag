@@ -809,6 +809,9 @@ th[aria-sort] .sort-link .icon-sm { opacity: 1; color: var(--accent); }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: var(--s3); margin-bottom: var(--s4); }
 .stat { border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); padding: var(--s3) var(--s4); box-shadow: var(--shadow-1); }
 .stat dt { font-size: 0.8125rem; color: var(--ink2); }
+.stat dd .sub { display: flex; align-items: center; gap: var(--s1); font-family: var(--font-body), system-ui, sans-serif; font-size: 0.8125rem; font-weight: 400; color: var(--ink2); }
+.stat dd .sub.up { color: var(--good-ink); }
+.stat dd .sub.down { color: var(--bad-ink); }
 .stat dd { font-family: var(--font-display), system-ui, sans-serif; font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 /* ───────────── Interacción: tooltips, hover, copiar ───────────── */

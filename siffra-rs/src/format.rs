@@ -21,6 +21,12 @@ pub fn format_tkr(n: i64) -> String {
     format_int(n)
 }
 
+/// Porcentaje con un decimal y el signo menos tipográfico (U+2212), como el resto de cifras negativas.
+pub fn percent1(v: f64) -> String {
+    let rounded = (v.abs() * 10.0).round() / 10.0;
+    if v < 0.0 && rounded > 0.0 { format!("−{rounded:.1} %") } else { format!("{rounded:.1} %") }
+}
+
 /// Equivalente a `Math.round` de JS (redondea los empates hacia +infinito).
 pub fn js_round(x: f64) -> f64 {
     (x + 0.5).floor()
@@ -43,6 +49,14 @@ mod tests {
     fn negative_uses_unicode_minus() {
         assert_eq!(format_tkr(-3800), "−3\u{00A0}800");
         assert_eq!(format_tkr(-174900), "−174\u{00A0}900");
+    }
+
+    #[test]
+    fn percent_uses_unicode_minus_and_never_negative_zero() {
+        assert_eq!(percent1(33.333), "33.3 %");
+        assert_eq!(percent1(-45.31), "−45.3 %");
+        assert_eq!(percent1(0.0), "0.0 %");
+        assert_eq!(percent1(-0.04), "0.0 %", "no se muestra −0.0 %");
     }
 
     #[test]

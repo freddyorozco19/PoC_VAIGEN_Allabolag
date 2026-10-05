@@ -2,6 +2,7 @@
 //!
 //! Servidor Axum con HTML renderizado en servidor (maud). Todos los datos son de EJEMPLO.
 
+mod annual_report;
 mod bolagsverket;
 mod format;
 mod model;
@@ -95,7 +96,15 @@ async fn live_company(org: &str) -> Response {
         return html_status(StatusCode::NOT_FOUND, views::company_not_found_page());
     }
     match bolagsverket::get_organisation_by_number(org).await {
-        Ok(o) => html(views::live_profile_page(&o)),
+        Ok(o) => {
+            // Las cuentas anuales requieren descargar y leer hasta 3 informes (varios segundos): si no están
+            // en caché, la ficha sale al instante con un esqueleto y el navegador pide `/foretag/:org/bokslut`.
+            let fin = match annual_report::peek(&o.organisationsnummer) {
+                Some(f) => views::FinState::Ready(f),
+                None => views::FinState::Pending,
+            };
+            html(views::live_profile_page(&o, &fin))
+        }
         Err(bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_)) => {
             html_status(StatusCode::NOT_FOUND, views::company_not_found_page())
         }
@@ -128,6 +137,28 @@ async fn company(Path(org): Path<String>, Query(p): Query<CompanyParams>) -> Res
             html(views::company_page(c, p.tab.as_deref().unwrap_or("ov"), &bench))
         }
         None => live_company(&org).await,
+    }
+}
+
+/// Fragmento HTML con las cifras de las cuentas anuales de una empresa real (lo pide la ficha en segundo plano).
+async fn company_bokslut(Path(org): Path<String>) -> Response {
+    if model::find_example_company(&org).is_some() || !bolagsverket::configured() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match annual_report::get_financials(&org).await {
+        Ok(f) => html(views::financials_fragment(f.as_ref())),
+        Err(e @ (bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_))) => {
+            eprintln!("{e}"); // visible en el registro: un rechazo silencioso ocultó un fallo real
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            let status = match e {
+                bolagsverket::BvError::Upstream { status: Some(429), .. } => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            status.into_response()
+        }
     }
 }
 
@@ -180,6 +211,7 @@ fn app() -> Router {
         .route("/sok", get(sok))
         .route("/foretag/:org", get(company))
         .route("/foretag/:org/benchmarks", get(company_benchmarks))
+        .route("/foretag/:org/bokslut", get(company_bokslut))
         .route("/bevakning", get(bevakning))
         .route("/likviditet", get(likviditet))
         .route("/sie", get(sie))
@@ -385,9 +417,53 @@ mod tests {
             Json(serde_json::from_str::<Value>(raw).unwrap()).into_response()
         }
 
+        fn authorised(headers: &HeaderMap) -> bool {
+            headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer tok-123")
+        }
+        // Lista de cuentas anuales: dos informes (2025 y 2023) para 5299999994; ninguno para el resto.
+        async fn fake_dokumentlista(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+            if !authorised(&headers) {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            let docs = if body["identitetsbeteckning"].as_str() == Some("5299999994") {
+                json!([
+                    {"dokumentId": "doc-2025", "filformat": "application/zip", "rapporteringsperiodTom": "2025-12-31", "registreringstidpunkt": "2026-07-01"},
+                    {"dokumentId": "doc-2024", "filformat": "application/zip", "rapporteringsperiodTom": "2024-12-31", "registreringstidpunkt": "2025-07-01"},
+                    {"dokumentId": "doc-2023", "filformat": "application/zip", "rapporteringsperiodTom": "2023-12-31", "registreringstidpunkt": "2024-07-01"}
+                ])
+            } else {
+                json!([])
+            };
+            Json(json!({ "dokument": docs })).into_response()
+        }
+        // Cada documento es un ZIP real con un informe iXBRL (sintético, con la estructura observada en producción).
+        async fn fake_dokument(headers: HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+            use std::io::Write;
+            if !authorised(&headers) {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            let year = match id.as_str() {
+                "doc-2025" => 2025,
+                "doc-2023" => 2023,
+                _ => return StatusCode::NOT_FOUND.into_response(),
+            };
+            let xhtml = annual_report::tests::report_xml(year, 1_000_000);
+            let mut buf = std::io::Cursor::new(Vec::new());
+            {
+                let mut w = zip::ZipWriter::new(&mut buf);
+                let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+                w.start_file("informe.xhtml", opts).unwrap();
+                w.write_all(xhtml.as_bytes()).unwrap();
+                w.finish().unwrap();
+            }
+            ([(header::CONTENT_TYPE, "application/zip")], buf.into_inner()).into_response()
+        }
+
         let fake = Router::new()
             .route("/oauth2/token", post(fake_token))
-            .route("/vardefulla-datamangder/v1/organisationer", post(fake_orgs));
+            .route("/vardefulla-datamangder/v1/organisationer", post(fake_orgs))
+            .route("/vardefulla-datamangder/v1/dokumentlista", post(fake_dokumentlista))
+            .route("/vardefulla-datamangder/v1/dokument/:id", get(fake_dokument));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
@@ -409,6 +485,35 @@ mod tests {
         ] {
             assert!(body.contains(needle), "la ficha real no contiene {needle:?}");
         }
+        // Cuentas anuales: la ficha sale al instante con un esqueleto y el fragmento trae las cifras reales.
+        assert!(body.contains(r#"data-fragment="/foretag/5299999994/bokslut""#), "esqueleto de carga diferida");
+        let (status, _, frag) = get_path("/foretag/5299999994/bokslut").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!frag.contains("<html"), "es un fragmento");
+        for needle in [
+            "Omsättning 2025",
+            "1\u{00A0}002 tkr", // 1 002 025 coronas → 1 002 tkr (gana el hecho exacto, no el redondeado)
+            "−46 tkr",          // resultado 2025: −45 678 coronas, con sign=\"-\"
+            "Soliditet",
+            "33.3 %",           // 300 / 900
+            "Eget kapital",
+            "Summa tillgångar",
+            "Räkenskapsåret slutar 2025-12-31",
+        ] {
+            assert!(frag.contains(needle), "el fragmento no contiene {needle:?}");
+        }
+        // Se leen informes alternos (2025 y 2023) y se unen: 2022..2025 → cuatro años en la tabla.
+        for year in ["2022", "2023", "2024", "2025"] {
+            assert!(frag.contains(&format!("<th class=\"right\" scope=\"col\">{year}</th>")), "falta la columna {year}");
+        }
+        // Con las cifras ya en caché, la ficha las incluye directamente (sin esqueleto).
+        let (_, _, again) = get_path("/foretag/5299999994").await;
+        assert!(!again.contains("data-fragment"), "ya en caché: sin carga diferida");
+        assert!(again.contains("Omsättning 2025") && again.contains("Bokslut"));
+        // Una empresa real sin cuentas digitales: mensaje claro en vez de cifras.
+        assert!(views::financials_fragment(None).into_string().contains("Inga digitalt inlämnade årsredovisningar"));
+        // Una de EJEMPLO no pasa por este fragmento.
+        assert_eq!(get_path("/foretag/559012-3456/bokslut").await.0, StatusCode::NOT_FOUND);
         // Buscador: un organisationsnummer real que no es de ejemplo.
         let (_, _, sok) = get_path("/sok?q=529999-9994").await;
         assert!(sok.contains("Cykelbolaget AB") && sok.contains("Bolagsverket"));
