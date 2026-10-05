@@ -1,0 +1,16 @@
+[package]
+name = "siffra-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Réplica en Rust (Axum + maud) del scaffold Next.js de Siffra. Datos de EJEMPLO, sin llamadas de red."
+publish = false
+
+[dependencies]
+axum = "0.7"
+maud = "0.26"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
