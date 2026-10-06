@@ -103,6 +103,19 @@ informe** (`dat`). Se cargan como fragmentos de `/foretag/<orgnr>/bokslut`.
   uno. La valoración usa también liquidez, capital perdido y cobertura de intereses cuando el informe los trae.
 - `siffra-rs report-dump <orgnr>` muestra lo guardado de una empresa.
 
+**Complemento ESEF (cotizadas).** La API gratuita de Bolagsverket solo entrega informes presentados en formato digital
+(pymes); Ericsson, Volvo, H&M… no están ahí. Cuando Bolagsverket **no tiene ningún informe** de la empresa, `src/esef.rs`
+busca su informe ESEF: relaciona el número de organización con su LEI (registro público GLEIF) y baja el xBRL-JSON del
+índice público de XBRL International (`filings.xbrl.org`, sin clave; ≈417 empresas suecas, ejercicios 2020-2024 en el
+momento de escribir esto, con retraso respecto a la presentación). Lo que ya se lee de Bolagsverket nunca se sustituye.
+- Las cifras son **consolidadas del grupo** (taxonomía IFRS), solo si el informe está en coronas, y la ficha lo avisa. Los
+  campos cuyo significado difiere de la taxonomía sueca (impuesto, personal, capital social, amortizaciones) se dejan sin dato.
+- Se guardan con el mismo almacén (`report` + `fact`, identificador `esef-<LEI>-<fin del ejercicio>`; el JSON original en
+  `SIFFRA_REPORTS`) y se vuelve a mirar si hay informe nuevo cada 7 días. Un fallo de red no se recuerda como "sin cuentas".
+- `SIFFRA_ESEF=0` apaga esta fuente; `SIFFRA_GLEIF_URL` / `SIFFRA_XBRL_URL` cambian las direcciones (las pruebas usan
+  servidores simulados y sin ellas no salen a la red). `siffra-rs esef-check <orgnr>` muestra lo que se encontraría.
+- No cubre empresas no cotizadas sin informe digital (p. ej. Spotify AB, filial de una sociedad luxemburguesa).
+
 ## Cuentas, roles e idiomas
 
 La aplicación exige iniciar sesión (nginx ya no pide clave). Las cuentas, las sesiones y el registro de actividad viven en

@@ -415,9 +415,10 @@ pub fn finance_tab(c: &Ctx, org: &Organisation, fin: Option<&Financials>, median
     let rest_costs = latest.operating_costs.map(|t| t - known_costs).filter(|r| *r > 0);
 
     html! {
+        @if fin.consolidated { p.note.esef-note { (c.t("fin.esef_note")) } }
         div.charts-grid.mt-4 {
             (chart_card(
-                c.t("fin.chart.income"), c.t("fin.chart.income_tip"),
+                c.t("fin.chart.income"),c.t("fin.chart.income_tip"),
                 grouped_bars(c, "ch-income", c.t("fin.chart.income"), &labels, &money_series, Unit::Tkr),
                 legend(&[(money_series[0].name.as_str(), "s1"), (money_series[1].name.as_str(), "s2"), (money_series[2].name.as_str(), "s3")]),
                 data_table(c, c.t("fin.chart.income"), &labels, &money_series, Unit::Tkr),
@@ -524,7 +525,7 @@ pub fn finance_tab(c: &Ctx, org: &Organisation, fin: Option<&Financials>, median
                 (money_row(c, c.t("fin.trade_payables"), &ys, |y| y.trade_payables, false))
             }))
         }
-        p.note { (c.tf("bok.source", &[latest.period_end.as_str()])) }
+        p.note { (c.tf(if fin.consolidated { "bok.source_esef" } else { "bok.source" }, &[latest.period_end.as_str()])) }
     }
 }
 

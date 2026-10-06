@@ -112,3 +112,7 @@ No hay copia automática instalada todavía.
 - Crecimiento: ≈50–200 KB por informe en disco y ≈100–250 filas por informe en la base. Entrar en la copia de seguridad
   (`siffra-rs backup` copia solo la base; copiar también la carpeta `reports`).
 - Ver un informe guardado: `siffra-rs report-dump <orgnr>`.
+- **Informes ESEF de cotizadas** (complemento, ver README): el servidor consulta `api.gleif.org` y `filings.xbrl.org` por
+  HTTPS saliente (sin claves). Un grupo grande pesa mucho en JSON (Volvo ≈ 17 MB por informe, hasta 3 informes): contar
+  ≈50 MB en `reports/` por cotizada y un pico de memoria de ≈50 MB medido al leer Volvo (muy por debajo de `max_memory_restart`).
+  Apagar con `SIFFRA_ESEF=0` en `ecosystem.config.cjs` y `pm2 restart siffra --update-env`.

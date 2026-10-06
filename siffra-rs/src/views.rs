@@ -1531,6 +1531,7 @@ pub fn financials_fragment(c: &Ctx, org: &Organisation, fin: Option<&Financials>
                 (info_btn(c.t("live.about_financials"), c.t("live.financials_tip")))
             }
             @if let Some(fin) = usable {
+                @if fin.consolidated { p.note { (c.t("fin.esef_note")) } }
                 (financials_body(c, fin))
             } @else {
                 p.muted { (c.t("bok.none")) }
@@ -1621,7 +1622,7 @@ fn financials_body(c: &Ctx, fin: &Financials) -> Markup {
                 }
             }
         }
-        p.note { (c.tf("bok.source", &[latest.period_end.as_str()])) }
+        p.note { (c.tf(if fin.consolidated { "bok.source_esef" } else { "bok.source" }, &[latest.period_end.as_str()])) }
     }
 }
 

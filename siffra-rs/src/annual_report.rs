@@ -80,6 +80,8 @@ pub struct FinancialYear {
 pub struct Financials {
     /// Del más antiguo al más reciente, máximo 5.
     pub years: Vec<FinancialYear>,
+    /// Cifras CONSOLIDADAS del grupo, de un informe ESEF (empresas cotizadas), no de Bolagsverket.
+    pub consolidated: bool,
 }
 
 impl Financials {
@@ -508,6 +510,33 @@ fn field_for(local: &str) -> Option<Field> {
     })
 }
 
+/// Concepto de la taxonomía IFRS (`ifrs-full`, informes ESEF de cotizadas) → campos. Son cifras del grupo.
+/// No se rellenan los campos cuyo significado difiere de la taxonomía sueca (impuesto, personal, capital social,
+/// amortizaciones): es mejor dejarlos sin dato que mostrarlos con otro significado.
+fn ifrs_fields(local: &str) -> &'static [Field] {
+    match local {
+        "Revenue" | "RevenueFromContractsWithCustomers" => &[Field::Revenue],
+        "ProfitLossFromOperatingActivities" => &[Field::OperatingResult],
+        // IFRS no tiene "resultado después de partidas financieras": es el resultado antes de impuestos.
+        "ProfitLossBeforeTax" => &[Field::ResultBeforeTax, Field::ResultAfterFinancial],
+        "ProfitLoss" => &[Field::NetResult],
+        "InterestExpense" => &[Field::InterestExpense],
+        "NoncurrentAssets" => &[Field::FixedAssets],
+        "CurrentAssets" => &[Field::CurrentAssets],
+        "Inventories" => &[Field::Inventory],
+        "CurrentTradeReceivables" => &[Field::TradeReceivables],
+        "TradeAndOtherCurrentReceivables" => &[Field::ShortReceivables],
+        "CashAndCashEquivalents" => &[Field::Cash],
+        "Assets" => &[Field::Assets],
+        "Equity" => &[Field::Equity],
+        "NoncurrentLiabilities" => &[Field::LongTermDebt],
+        "CurrentLiabilities" => &[Field::ShortTermDebt],
+        "TradeAndOtherCurrentPayables" => &[Field::TradePayables],
+        "AverageNumberOfEmployees" => &[Field::Employees],
+        _ => &[],
+    }
+}
+
 /// `reports`: los hechos de cada informe, del MÁS RECIENTE al más antiguo.
 /// Para cada (campo, fin de periodo) gana el hecho más preciso (menor `scale`) y, a igualdad, el del informe más reciente.
 /// Solo cuentan los hechos del total de la empresa (sin desglose) de un instante o de un ejercicio de ~12 meses.
@@ -518,14 +547,21 @@ pub fn merge_raw(reports: &[Vec<RawFact>]) -> Financials {
             if !f.dims.is_empty() {
                 continue;
             }
-            let (Some(field), Some(value)) = (field_for(f.local()), f.value) else { continue };
+            let Some(value) = f.value else { continue };
+            let swedish = field_for(f.local());
+            let fields: &[Field] = if f.concept.starts_with("ifrs-full:") { ifrs_fields(f.local()) } else { swedish.as_slice() };
+            if fields.is_empty() {
+                continue;
+            }
             let Some(period_end) = (if f.instant.is_some() { f.instant.clone() } else if f.is_full_year() { f.end.clone() } else { None }) else { continue };
-            let key = (field, period_end);
-            let candidate = (f.scale, rank, value);
-            match best.get(&key) {
-                Some(current) if (current.0, current.1) <= (candidate.0, candidate.1) => {}
-                _ => {
-                    best.insert(key, candidate);
+            for &field in fields {
+                let key = (field, period_end.clone());
+                let candidate = (f.scale, rank, value);
+                match best.get(&key) {
+                    Some(current) if (current.0, current.1) <= (candidate.0, candidate.1) => {}
+                    _ => {
+                        best.insert(key, candidate);
+                    }
                 }
             }
         }
@@ -581,7 +617,7 @@ pub fn merge_raw(reports: &[Vec<RawFact>]) -> Financials {
     if years.len() > MAX_YEARS {
         years.drain(..years.len() - MAX_YEARS);
     }
-    Financials { years }
+    Financials { years, consolidated: false }
 }
 
 /// Une los hechos de interés (4 cifras) de varios informes; solo se usa en las pruebas.
@@ -682,6 +718,21 @@ impl Store {
         });
         self.db.report_save(orgnr, &doc.id, &doc.period_end, &doc.registered, raw_path.as_deref(), facts);
     }
+
+    /// Igual que `save`, para un informe ESEF: el original es el xBRL-JSON (`.json`) que publica XBRL International.
+    pub(crate) fn save_esef(&self, orgnr: &str, doc: &DocRef, json: &[u8], facts: &[RawFact]) {
+        let raw_path = self.dir.as_ref().and_then(|dir| {
+            if !bolagsverket::valid_document_id(&doc.id) || !orgnr.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let folder = dir.join(orgnr);
+            std::fs::create_dir_all(&folder).ok()?;
+            let path = folder.join(format!("{}.json", doc.id));
+            std::fs::write(&path, json).ok()?;
+            Some(path.to_string_lossy().into_owned())
+        });
+        self.db.report_save(orgnr, &doc.id, &doc.period_end, &doc.registered, raw_path.as_deref(), facts);
+    }
 }
 
 /// Informes ya guardados de una empresa, con todos sus hechos (el de ejercicio más reciente primero).
@@ -729,6 +780,27 @@ pub async fn get_financials(orgnr: &str) -> Result<Option<Financials>, BvError> 
 
     let store = current_store();
     let docs = pick_reports(bolagsverket::list_documents(&id).await?);
+
+    // Complemento: sin informes digitales en Bolagsverket, las cotizadas pueden tener su informe ESEF (cifras del
+    // grupo). Solo se mira cuando Bolagsverket no tiene nada; lo de Bolagsverket nunca se sustituye.
+    if docs.is_empty() {
+        match crate::esef::load_reports(store.as_ref(), &id).await {
+            Ok(reports) if !reports.is_empty() => {
+                let mut fin = merge_raw(&reports);
+                fin.consolidated = true;
+                let result = Some(fin).filter(|f| !f.years.is_empty());
+                CACHE.lock().unwrap().insert(id, (Instant::now(), result.clone()));
+                return Ok(result);
+            }
+            Ok(_) => {}
+            // Fallo de red o de servicio: no se recuerda como "sin cuentas" para reintentar en la próxima visita.
+            Err(e) => {
+                eprintln!("ESEF {id}: {e}");
+                return Ok(None);
+            }
+        }
+    }
+
     let mut reports: Vec<Vec<RawFact>> = Vec::new();
     for (i, doc) in docs.iter().enumerate() {
         match load_report(store.as_ref(), &id, doc).await {

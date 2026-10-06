@@ -10,6 +10,7 @@ mod auth;
 mod bolagsverket;
 mod catalog;
 mod db;
+mod esef;
 mod format;
 mod handlers;
 mod handlers_tools;
@@ -145,6 +146,7 @@ const USAGE: &str = "Uso:
   siffra-rs registry-import ARCHIVO [--out registry.db] [--limit N]
                                                       Carga bolagsverket_bulkfil.zip (o su .txt) en un índice de nombres
   siffra-rs report-dump ORGNR [--dims] [--text]       Muestra todo lo que trae el último informe anual de una empresa
+  siffra-rs esef-check ORGNR                          Cifras consolidadas ESEF de una cotizada (complemento de Bolagsverket)
   siffra-rs registry-stats [--db registry.db]         Cifras del índice (filas, activas, por tipo de identidad y forma)
   siffra-rs registry-search TEXTO [--db registry.db] [--all] [--limit N]
                                                       Busca por nombre (--all incluye las dadas de baja)";
@@ -273,6 +275,24 @@ async fn run_cli(args: &[String]) -> bool {
                     None => f.text.clone().unwrap_or_default().chars().take(90).collect::<String>().replace('\n', " "),
                 };
                 println!("{:<62} {:<23} {}{}", f.concept, period, value, if f.dims.is_empty() { String::new() } else { format!("  [{}]", f.dims) });
+            }
+            true
+        }
+        "esef-check" => {
+            // Diagnóstico: ¿hay informe ESEF (cotizadas) de esta empresa? Muestra las cifras de grupo por ejercicio.
+            let orgnr = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            let Some(id) = bolagsverket::normalize_org_number(&orgnr) else { fail("Número de organización no válido.") };
+            let reports = esef::load_reports(None, &id).await.unwrap_or_else(|e| fail(&e));
+            if reports.is_empty() {
+                println!("Sin informes ESEF para {id} (no es cotizada, no tiene LEI, o el informe no está en coronas).");
+            } else {
+                let fin = annual_report::merge_raw(&reports);
+                println!("{} informes ESEF leídos; cifras consolidadas en tkr:", reports.len());
+                let n = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
+                println!("{:<6} {:>14} {:>14} {:>14} {:>14} {:>14}", "año", "facturación", "res.explot.", "res.antes imp.", "activos", "patrimonio");
+                for y in &fin.years {
+                    println!("{:<6} {:>14} {:>14} {:>14} {:>14} {:>14}", y.label, n(y.revenue), n(y.operating_result), n(y.result), n(y.assets), n(y.equity));
+                }
             }
             true
         }

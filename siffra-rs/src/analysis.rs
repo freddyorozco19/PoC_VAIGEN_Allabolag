@@ -131,7 +131,8 @@ pub fn assess(org: &Organisation, fin: Option<&Financials>, medians: Option<&Sec
     let latest = fin.latest().expect("comprobado arriba");
     let previous = fin.previous();
 
-    if months_between(&latest.period_end, today).is_some_and(|m| m > STALE_MONTHS) {
+    // En un informe ESEF el retraso suele ser del índice público y no de la empresa: no se avisa.
+    if !fin.consolidated && months_between(&latest.period_end, today).is_some_and(|m| m > STALE_MONTHS) {
         signals.push(Signal::StaleReport(latest.period_end.clone()));
     }
 
@@ -312,7 +313,7 @@ mod tests {
     }
 
     fn fin(years: Vec<FinancialYear>) -> Financials {
-        Financials { years }
+        Financials { years, consolidated: false }
     }
 
 

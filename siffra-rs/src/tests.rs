@@ -1400,7 +1400,7 @@ fn assessment_numbers_are_rounded_and_the_summary_reads_well() {
     org.avregistreringsdatum = None;
     org.aktiv = true;
     let year = |label: &str, revenue, result, equity, assets| FinancialYear { period_end: format!("{label}-12-31"), label: label.into(), revenue: Some(revenue), result: Some(result), equity: Some(equity), assets: Some(assets), ..Default::default() };
-    let fin = Financials { years: vec![year("2024", 2_615, 190, 580, 2_100), year("2025", 2_519, 176, 600, 2_150)] };
+    let fin = Financials { years: vec![year("2024", 2_615, 190, 580, 2_100), year("2025", 2_519, 176, 600, 2_150)], consolidated: false };
     let med = SectorMedians { margin: 18.2, solidity: 68.0, liquidity: 294.0, year: "2024".into(), sni_code: "71.121".into(), sni_label: "Tekniska konsultbyråer".into(), size_class: "TOT".into(), exact_sni: true, exact_size: false };
 
     let es = views::financials_fragment(&Ctx::new(Lang::Es), &org, Some(&fin), Some(&med)).into_string();
@@ -1761,4 +1761,173 @@ fn companies_without_digital_accounts_get_an_explanation_and_examples() {
     }
     let es = crate::views_fin::finance_tab(&Ctx::new(Lang::Es), &org, None, None).into_string();
     assert!(es.contains("iXBRL") && es.contains("556970-5329"));
+}
+
+// ───────────────────────── Complemento ESEF (cotizadas) ─────────────────────────
+
+/// Servidor simulado de Bolagsverket (SIN informes digitales), GLEIF y filings.xbrl.org. Cuenta las descargas del JSON.
+async fn fake_esef_world(downloads: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::extract::{Path, Query, State};
+    use axum::{Form, Json};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+
+    async fn token(Form(_): Form<HashMap<String, String>>) -> Response {
+        Json(json!({ "access_token": "tok-123", "expires_in": 3600 })).into_response()
+    }
+    async fn orgs(Json(_): Json<Value>) -> Response {
+        Json(serde_json::from_str::<Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap()).into_response()
+    }
+    async fn docs(Json(_): Json<Value>) -> Response {
+        Json(json!({ "dokument": [] })).into_response()
+    }
+    // Solo "556042-7220" tiene LEI; el registro de otra autoridad (RA distinto) no debe servir.
+    async fn gleif(Query(q): Query<HashMap<String, String>>) -> Response {
+        let wanted = q.get("filter[entity.registeredAs]").cloned().unwrap_or_default();
+        let data = if wanted == "556042-7220" {
+            json!([
+                { "id": "AAAAAAAAAAAAAAAAAAAA", "attributes": { "registration": { "status": "LAPSED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000001" } } } },
+                { "id": "549300HGV012CNC8JD22", "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000544" } } } }
+            ])
+        } else {
+            json!([])
+        };
+        Json(json!({ "data": data })).into_response()
+    }
+    async fn filings(Path(lei): Path<String>) -> Response {
+        if lei != "549300HGV012CNC8JD22" {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let f = |period: &str, added: &str, path: &str, country: &str| {
+            json!({ "attributes": { "period_end": period, "date_added": added, "json_url": path, "country": country } })
+        };
+        Json(json!({ "data": [
+            f("2024-12-31", "2025-05-01 10:00:00", "/files/volvo-2024-en.json", "SE"),
+            f("2024-12-31", "2025-05-08 11:26:57", "/files/volvo-2024-sv.json", "SE"),
+            f("2024-12-31", "2025-06-01 00:00:00", "/files/other-country.json", "NO"),
+            f("2024-12-31", "2025-07-01 00:00:00", "https://evil.example/x.json", "SE"),
+        ] }))
+        .into_response()
+    }
+    async fn file(State(n): State<std::sync::Arc<std::sync::atomic::AtomicUsize>>, Path(name): Path<String>) -> Response {
+        n.fetch_add(1, Ordering::SeqCst);
+        // La versión inglesa (registrada antes) trae otra facturación: debe ganar la sueca (registrada más tarde).
+        let revenue = if name.contains("-en") { "1000000000.0" } else { "526816000000.0" };
+        let fact = |concept: &str, period: &str, value: &str| {
+            json!({ "value": value, "dimensions": { "concept": concept, "entity": "scheme:549300HGV012CNC8JD22", "period": period, "unit": "iso4217:SEK" } })
+        };
+        let cur = "2024-01-01T00:00:00/2025-01-01T00:00:00";
+        let prev = "2023-01-01T00:00:00/2024-01-01T00:00:00";
+        Json(json!({ "documentInfo": {}, "facts": {
+            "f1": fact("ifrs-full:Revenue", cur, revenue),
+            "f2": fact("ifrs-full:Revenue", prev, "552252000000.0"),
+            "f3": fact("ifrs-full:ProfitLossFromOperatingActivities", cur, "66611000000.0"),
+            "f4": fact("ifrs-full:ProfitLossBeforeTax", cur, "67210000000.0"),
+            "f5": fact("ifrs-full:ProfitLoss", cur, "50576000000.0"),
+            "f6": fact("ifrs-full:Assets", "2025-01-01T00:00:00", "714564000000.0"),
+            "f7": fact("ifrs-full:Assets", "2024-01-01T00:00:00", "674068000000.0"),
+            "f8": fact("ifrs-full:Equity", "2025-01-01T00:00:00", "197361000000.0"),
+            "f9": fact("ifrs-full:CurrentAssets", "2025-01-01T00:00:00", "358309000000.0"),
+            "f10": fact("ifrs-full:CurrentLiabilities", "2025-01-01T00:00:00", "261298000000.0"),
+            "f11": fact("ifrs-full:InterestExpense", cur, "1592000000.0"),
+            "t1": { "value": "<div>Grund för <b>rapporten</b></div>", "dimensions": { "concept": "eric:Nota", "entity": "scheme:X", "period": cur, "language": "sv" } }
+        } }))
+        .into_response()
+    }
+    let app = Router::new()
+        .route("/oauth2/token", post(token))
+        .route("/vardefulla-datamangder/v1/organisationer", post(orgs))
+        .route("/vardefulla-datamangder/v1/dokumentlista", post(docs))
+        .route("/lei-records", get(gleif))
+        .route("/api/entities/:lei/filings", get(filings))
+        .route("/files/:name", get(file))
+        .with_state(downloads);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::set_var("BOLAGSVERKET_CLIENT_ID", "test-id");
+    std::env::set_var("BOLAGSVERKET_CLIENT_SECRET", "test-secret");
+    std::env::set_var("BOLAGSVERKET_BASE_URL", format!("http://{addr}/vardefulla-datamangder/v1"));
+    std::env::set_var("SIFFRA_GLEIF_URL", format!("http://{addr}"));
+    std::env::set_var("SIFFRA_XBRL_URL", format!("http://{addr}"));
+}
+
+fn unset_esef_env() {
+    for k in ["SIFFRA_GLEIF_URL", "SIFFRA_XBRL_URL", "SIFFRA_ESEF"] {
+        std::env::remove_var(k);
+    }
+}
+
+#[tokio::test]
+async fn listed_companies_without_digital_accounts_get_consolidated_esef_figures() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let _env = lock_bolagsverket_env();
+    let downloads = Arc::new(AtomicUsize::new(0));
+    fake_esef_world(downloads.clone()).await;
+    let f = fx();
+    let dir = std::env::temp_dir().join(format!("siffra-esef-{}", crate::util::random_hex(4)));
+    annual_report::set_store(annual_report::Store { db: f.st.db.clone(), dir: Some(dir.clone()) });
+    let org = "5560427220";
+
+    // Finanzas: aviso de cifras consolidadas, gráficos y ratios con las cifras IFRS.
+    let fin = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=fin&lang=es")).await;
+    assert_eq!(fin.status, StatusCode::OK);
+    for needle in ["Cifras consolidadas del grupo", "Ratios financieros", "Margen operativo", "Cobertura de intereses"] {
+        assert!(fin.body.contains(needle), "la pestaña Finanzas no contiene {needle:?}: {}", &fin.body[..fin.body.len().min(400)]);
+    }
+    assert!(fin.body.matches("<svg").count() >= 3);
+    assert!(!fin.body.contains("no ha presentado cuentas anuales digitales"));
+    // Gana la versión registrada más tarde (sueca) y no se usa ni otro país ni una URL externa.
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "una sola descarga: la versión sueca");
+
+    // Guardado con el mismo almacén: hechos en la base y el JSON original en disco.
+    let stored = annual_report::stored_reports(org);
+    assert_eq!(stored.len(), 1);
+    assert!(stored[0].0.doc_id.starts_with("esef-549300HGV012CNC8JD22-2024-12-31"));
+    assert!(stored[0].1.iter().any(|f| f.concept == "ifrs-full:Assets" && f.instant.as_deref() == Some("2024-12-31")), "el balance cae en el 31 de diciembre");
+    assert!(stored[0].1.iter().any(|f| f.text.as_deref() == Some("Grund för rapporten")), "los textos se guardan sin etiquetas HTML");
+    assert!(stored[0].1.iter().any(|f| f.concept == "ifrs-full:Revenue" && f.value == Some(526_816_000_000.0)), "gana la versión sueca");
+    assert_eq!(std::fs::read_dir(dir.join(org)).unwrap().count(), 1);
+
+    // Resumen y Datos: salen de lo guardado, sin más descargas.
+    let ov = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?lang=es")).await.body;
+    assert!(ov.contains("Cifras consolidadas del grupo"));
+    assert!(ov.contains("informes anuales ESEF") && !ov.contains("presentadas en Bolagsverket"), "la fuente citada es ESEF");
+    assert!(!ov.contains("puede haber retraso"), "el retraso del índice público no se presenta como retraso de la empresa");
+    let dat =f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=dat&lang=es")).await.body;
+    assert!(dat.contains("Informes leídos") && dat.contains("esef-549300HGV012CNC8JD22-2024-12-31"));
+    assert_eq!(downloads.load(Ordering::SeqCst), 1);
+
+    // Una empresa sin LEI sigue mostrando el estado vacío de siempre (con su explicación).
+    let none = f.get(&f.user_s, "/foretag/5569991234/bokslut?tab=fin&lang=es").await.body;
+    assert!(none.contains("no ha presentado cuentas anuales digitales"));
+    assert!(!none.contains("Cifras consolidadas del grupo"));
+
+    // Idiomas: nada sin traducir.
+    for lang in Lang::ALL {
+        let r = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=fin&lang={}", lang.code())).await;
+        assert!(!r.body.contains('⟦'), "{lang:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    unset_bolagsverket_env();
+    unset_esef_env();
+}
+
+#[tokio::test]
+async fn esef_can_be_switched_off_and_never_runs_without_servers_in_tests() {
+    let _env = lock_bolagsverket_env();
+    let downloads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fake_esef_world(downloads.clone()).await;
+    std::env::set_var("SIFFRA_ESEF", "0");
+    let reports = crate::esef::load_reports(None, "5560427220").await.unwrap();
+    assert!(reports.is_empty(), "apagada con SIFFRA_ESEF=0");
+    std::env::remove_var("SIFFRA_ESEF");
+    std::env::remove_var("SIFFRA_GLEIF_URL");
+    std::env::remove_var("SIFFRA_XBRL_URL");
+    assert!(crate::esef::load_reports(None, "5560427220").await.unwrap().is_empty(), "sin direcciones configuradas las pruebas no salen a la red");
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    unset_bolagsverket_env();
+    unset_esef_env();
 }
