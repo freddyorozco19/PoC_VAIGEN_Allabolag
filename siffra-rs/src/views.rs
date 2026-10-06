@@ -3,6 +3,7 @@
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
+use crate::analysis::{self, Signal};
 use crate::annual_report::Financials;
 use crate::bolagsverket::Organisation;
 use crate::db::{Role, User};
@@ -24,12 +25,14 @@ pub struct Ctx {
     pub path: String,
     pub query: String,
     pub csrf: String,
+    /// Modo demo: muestra las empresas y pantallas de EJEMPLO.
+    pub demo: bool,
 }
 
 impl Ctx {
     #[cfg(test)]
     pub fn new(lang: Lang) -> Ctx {
-        Ctx { lang, user: None, path: "/".into(), query: String::new(), csrf: String::new() }
+        Ctx { lang, user: None, path: "/".into(), query: String::new(), csrf: String::new(), demo: true }
     }
     pub fn t(&self, key: &str) -> &'static str {
         i18n::t(self.lang, key)
@@ -410,14 +413,17 @@ fn sidebar(c: &Ctx) -> Markup {
                     @if let Some(u) = &c.user { (user_menu(c, u)) }
                 }
             }
-            nav.side-nav aria-label=(c.t("ui.main_menu")) {
+            nav class={"side-nav" @if !c.demo { " single" }} aria-label=(c.t("ui.main_menu")) {
                 div.nav-group {
                     div.nav-heading { (c.t("nav.group.companies")) }
-                    @for item in NAV_COMPANIES.iter() { (nav_link(c, item)) }
+                    // Vigilancia, liquidez, SIE y facturas son maquetas con datos de EJEMPLO: solo en modo demo.
+                    @for item in NAV_COMPANIES.iter().filter(|i| c.demo || i.href == "/sok") { (nav_link(c, item)) }
                 }
-                div.nav-group {
-                    div.nav-heading { (c.t("nav.group.business")) }
-                    @for item in NAV_BUSINESS.iter() { (nav_link(c, item)) }
+                @if c.demo {
+                    div.nav-group {
+                        div.nav-heading { (c.t("nav.group.business")) }
+                        @for item in NAV_BUSINESS.iter() { (nav_link(c, item)) }
+                    }
                 }
                 @if admin {
                     div.nav-group.nav-admin {
@@ -799,6 +805,9 @@ fn sortable_th(c: &Ctx, label: &str, col: &str, q: &str, sort: Option<&str>, dir
     }
 }
 
+/// Búsquedas de ejemplo (empresas reales conocidas) para la portada del buscador y el estado vacío fuera del modo demo.
+const REAL_EXAMPLES: [&str; 4] = ["Volvo", "Spotify", "Ericsson", "556703-7485"];
+
 const SEARCH_SCRIPT: &str = r#"(function(){var i=document.getElementById('q');if(!i)return;
 if(i.value&&location.search.indexOf('q=')>-1&&!document.querySelector('[aria-sort]')){i.focus();var n=i.value.length;try{i.setSelectionRange(n,n);}catch(e){}}
 var t;i.addEventListener('input',function(){clearTimeout(t);t=setTimeout(function(){i.form.submit();},350);});})();"#;
@@ -847,7 +856,9 @@ fn registry_row(c: &Ctx, h: &Hit) -> Markup {
 }
 
 pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, live: Option<&Organisation>, registry: Option<&RegistryHits>) -> Markup {
-    let mut results = search_example_companies(query);
+    let mut results = if c.demo { search_example_companies(query) } else { Vec::new() };
+    // Sin modo demo y sin texto de búsqueda: portada de búsqueda en vez de una lista (no hay lista que mostrar).
+    let intro = !c.demo && query.trim().is_empty();
     let live = live.filter(|_| results.is_empty());
     let reg_hits: &[Hit] = registry.map(|r| r.hits.as_slice()).unwrap_or(&[]);
     let sort = sort.filter(|s| ["name", "revenue", "result"].contains(s));
@@ -880,7 +891,11 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
         html! {
             div.page-head {
                 h1.page-title { (c.t("nav.search")) }
-                p.lead { (c.t("sok.lead")) " " strong { (c.t("common.example_upper")) } " " (c.t("sok.lead_b")) }
+                @if c.demo {
+                    p.lead { (c.t("sok.lead")) " " strong { (c.t("common.example_upper")) } " " (c.t("sok.lead_b")) }
+                } @else {
+                    p.lead { (c.t("sok.lead.real")) }
+                }
             }
             form.search role="search" method="get" action="/sok" {
                 label.field-label for="q" { (c.t("sok.label")) }
@@ -898,6 +913,14 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
                 }
                 p.field-hint.js-only { (c.t("sok.hint_a")) " " kbd { "/" } " " (c.t("sok.hint_b")) }
             }
+            @if intro {
+                div.card.glass.narrow.intro {
+                    h2.card-title { (c.t("sok.intro.title")) }
+                    p { (c.t("sok.intro.text")) }
+                    p.muted.intro-try { (c.t("sok.try")) }
+                    div.chips.chips-left { @for q in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (q) } } }
+                }
+            } @else {
             p.result-count role="status" { (count_text) }
             div.table-wrap {
                 table.row-link {
@@ -944,10 +967,14 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
                                         strong { (c.t("sok.empty.title")) }
                                         p { (c.t("sok.empty.text")) }
                                         div.chips {
-                                            a.chip href=(sok_url("Göteborg", None)) { "Göteborg" }
-                                            a.chip href=(sok_url("Uppsala", None)) { "Uppsala" }
-                                            a.chip href=(sok_url("559108-7721", None)) { "559108-7721" }
-                                            a.chip href="/sok" { (c.t("sok.empty.all")) }
+                                            @if c.demo {
+                                                a.chip href=(sok_url("Göteborg", None)) { "Göteborg" }
+                                                a.chip href=(sok_url("Uppsala", None)) { "Uppsala" }
+                                                a.chip href=(sok_url("559108-7721", None)) { "559108-7721" }
+                                                a.chip href="/sok" { (c.t("sok.empty.all")) }
+                                            } @else {
+                                                @for q in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (q) } }
+                                            }
                                         }
                                     }
                                 }
@@ -959,11 +986,12 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
             @if live.is_some() {
                 p.note { (c.t("sok.note.live")) }
             } @else if reg_hits.is_empty() {
-                p.note { (example_badge(c)) " " (c.t("sok.note.example")) }
+                @if c.demo { p.note { (example_badge(c)) " " (c.t("sok.note.example")) } }
             } @else {
                 p.note { (c.t("sok.note.registry")) }
                 @if registry.is_some_and(|r| r.more) { p.note { (c.tf("sok.registry_more", &[&reg_hits.len().to_string()])) } }
-                @if !results.is_empty() { p.note { (example_badge(c)) " " (c.t("sok.note.example")) } }
+                @if c.demo && !results.is_empty() { p.note { (example_badge(c)) " " (c.t("sok.note.example")) } }
+            }
             }
             // Filtrado "en vivo": reenvía el formulario al escribir (con retardo).
             script { (PreEscaped(SEARCH_SCRIPT)) }
@@ -1249,7 +1277,8 @@ pub fn message_page(c: &Ctx, title: &str, text: &str) -> Markup {
 
 /// Estado de la sección de cuentas de una ficha real al renderizar: ya en caché, o pendiente de descargar.
 pub enum FinState {
-    Ready(Option<Financials>),
+    /// Cuentas ya en caché (o "sin cuentas") y medianas del sector (o "sin datos").
+    Ready(Option<Financials>, Option<SectorMedians>),
     Pending,
 }
 
@@ -1317,40 +1346,171 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState) -> Markup {
                     p.note { (c.t("live.swedish_note")) }
                 }
             }
-            div.card.mt-4 {
-                h2.card-title {
-                    (c.t("live.financials"))
-                    (info_btn(c.t("live.about_financials"), c.t("live.financials_tip")))
-                }
-                @match fin {
-                    FinState::Pending => {
-                        div #fin-body aria-busy="true" data-fragment=(format!("/foretag/{}/bokslut", o.organisationsnummer)) {
+            @match fin {
+                FinState::Pending => {
+                    div #fin-body aria-busy="true" data-fragment=(format!("/foretag/{}/bokslut", o.organisationsnummer)) {
+                        div.card.mt-4 {
+                            h2.card-title { (c.t("as.title")) }
                             (sr(c.t("live.loading")))
                             @for _ in 0..4 {
                                 div.skeleton-row aria-hidden="true" { div.skeleton-line {} div.skeleton-bar {} }
                             }
                             p.bench-error hidden { (c.t("live.error")) }
                         }
-                        script { (PreEscaped(BENCH_SCRIPT)) }
                     }
-                    FinState::Ready(f) => { div #fin-body { (financials_fragment(c, f.as_ref())) } }
+                    script { (PreEscaped(BENCH_SCRIPT)) }
                 }
+                FinState::Ready(f, m) => { div #fin-body { (financials_fragment(c, o, f.as_ref(), m.as_ref())) } }
             }
             p.note { (c.t("live.source")) }
         },
     )
 }
 
-/// Cifras reales de las cuentas anuales: resumen del último año, gráfico de facturación y tabla.
-/// `None` = la empresa no ha presentado cuentas anuales digitales.
-pub fn financials_fragment(c: &Ctx, fin: Option<&Financials>) -> Markup {
-    let Some(fin) = fin.filter(|f| f.latest().is_some()) else {
-        return html! {
-            p.muted { (c.t("bok.none")) }
-            p.note { (c.t("bok.none_note")) }
-        };
+fn risk_pill_opt(c: &Ctx, level: Option<Severity>) -> Markup {
+    match level {
+        Some(l) => risk_pill(c, l),
+        None => html! { span.pill.pill-user { span.pill-dot aria-hidden="true" {} (c.t("risk.unknown")) } },
+    }
+}
+
+/// Texto de una señal en el idioma de la persona, con las cifras reales de la empresa.
+fn signal_text(c: &Ctx, s: &Signal) -> String {
+    let money = |v: i64| c.money(v);
+    match s {
+        Signal::Insolvency(t) => c.tf("sig.insolvency", &[t]),
+        Signal::Deregistered(d) => c.tf("sig.deregistered", &[d]),
+        Signal::NoFilings => c.t("sig.no_filings").to_string(),
+        Signal::StaleReport(d) => c.tf("sig.stale", &[d]),
+        Signal::NegativeEquity(e) => c.tf("sig.negative_equity", &[&money(*e)]),
+        Signal::LossStreak(a, b) => c.tf("sig.loss_streak", &[&money(*a), &money(*b)]),
+        Signal::Loss(r) => c.tf("sig.loss", &[&money(*r)]),
+        Signal::LowSolidity(p) => c.tf("sig.low_solidity", &[&c.pct1(*p)]),
+        Signal::SolidityBelowMedian(v, m) => c.tf("sig.solidity_below", &[&c.pct1(*v), &c.pct1(*m)]),
+        Signal::SolidityAboveMedian(v, m) => c.tf("sig.solidity_above", &[&c.pct1(*v), &c.pct1(*m)]),
+        Signal::MarginBelowMedian(v, m) => c.tf("sig.margin_below", &[&c.pct1(*v), &c.pct1(*m)]),
+        Signal::MarginAboveMedian(v, m) => c.tf("sig.margin_above", &[&c.pct1(*v), &c.pct1(*m)]),
+        Signal::RevenueDrop(p, from, to) => c.tf("sig.revenue_drop", &[&c.pct1(*p), from, to]),
+        Signal::RevenueGrowth(p, from, to) => c.tf("sig.revenue_growth", &[&c.pct1(*p), from, to]),
+        Signal::Profitable(n) => c.tf("sig.profitable", &[&n.to_string()]),
+    }
+}
+
+/// Resumen en lenguaje natural construido con reglas sobre las cifras reales (no usa ningún modelo de IA).
+fn live_summary(c: &Ctx, fin: Option<&Financials>, medians: Option<&SectorMedians>, level: Option<Severity>) -> String {
+    let Some(latest) = fin.and_then(|f| f.latest()) else { return c.t("sum.live.no_data").to_string() };
+    let previous = fin.and_then(|f| f.previous());
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(rev) = latest.revenue {
+        let growth = previous.and_then(|p| p.revenue).filter(|b| *b > 0).map(|b| (rev as f64 / b as f64 - 1.0) * 100.0);
+        let prev_label = previous.map(|p| p.label.as_str()).unwrap_or("");
+        parts.push(match growth {
+            Some(g) if g >= 1.0 => c.tf("sum.live.rev_up", &[&latest.label, &c.money(rev), &c.pct1(g), prev_label]),
+            Some(g) if g <= -1.0 => c.tf("sum.live.rev_down", &[&latest.label, &c.money(rev), &c.pct1(-g), prev_label]),
+            _ => c.tf("sum.live.rev", &[&latest.label, &c.money(rev)]),
+        });
+    }
+    if let Some(res) = latest.result {
+        parts.push(match latest.margin() {
+            Some(m) if res >= 0 => c.tf("sum.live.profit", &[&c.money(res), &c.pct1(m)]),
+            Some(m) => c.tf("sum.live.loss", &[&c.money(-res), &c.pct1(m)]),
+            None => c.tf("sum.live.result_only", &[&c.money(res)]),
+        });
+    }
+    if let Some(s) = latest.solidity() {
+        parts.push(match medians {
+            Some(m) => c.tf("sum.live.solidity_vs", &[&c.pct1(s), c.t(if s >= m.solidity { "bench.above" } else { "bench.below" }), &c.pct1(m.solidity)]),
+            None => c.tf("sum.live.solidity", &[&c.pct1(s)]),
+        });
+    }
+    if let Some(l) = level {
+        parts.push(
+            c.t(match l {
+                Severity::Good => "sum.live.risk_good",
+                Severity::Warn => "sum.live.risk_warn",
+                Severity::Bad => "sum.live.risk_bad",
+            })
+            .to_string(),
+        );
+    }
+    parts.join(" ")
+}
+
+/// Un decimal: las barras de comparación muestran el número tal cual, y las cifras reales traen muchos decimales.
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+/// Tarjeta de valoración: nivel de riesgo, resumen, señales con sus cifras y comparación con el sector.
+fn assessment_card(c: &Ctx, org: &Organisation, fin: Option<&Financials>, medians: Option<&SectorMedians>) -> Markup {
+    let today = crate::util::now_iso();
+    let a = analysis::assess(org, fin, medians, &today[..10]);
+    let latest = fin.and_then(|f| f.latest());
+    let summary = live_summary(c, fin, medians, a.level);
+    let bars: Vec<(&str, &str, BenchmarkPair, f64)> = match (latest, medians) {
+        (Some(y), Some(m)) => [
+            y.margin().map(|v| ("term.margin", "tip.margin", BenchmarkPair { value: round1(v), median: round1(m.margin) }, 30.0)),
+            y.solidity().map(|v| ("term.solidity", "tip.solidity.bench", BenchmarkPair { value: round1(v), median: round1(m.solidity) }, 80.0)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        _ => vec![],
     };
-    let latest = fin.latest().expect("comprobado arriba");
+    html! {
+        div.card.mt-4 {
+            h2.card-title { (c.t("as.title")) (info_btn(c.t("as.about"), c.t("as.tip"))) }
+            div.assess-head {
+                (risk_pill_opt(c, a.level))
+                @if let Some(y) = latest { span.muted { (c.tf("as.based_on", &[y.label.as_str()])) } }
+            }
+            p.summary-text { (summary) }
+            ul.alert-list.mt-3 {
+                @for s in &a.signals { (alert_row(c, s.severity(), html! { (signal_text(c, s)) })) }
+                @if a.signals.is_empty() { li { span { (c.t("as.no_signals")) } } }
+            }
+            @if !bars.is_empty() {
+                h3.subtitle { (c.t("ov.bench_title")) }
+                @for (label, tip, pair, scale) in &bars { (benchmark_row(c, label, tip, *pair, *scale)) }
+                (bench_legend(c))
+                @if let Some(m) = medians {
+                    @let label = if m.sni_label.is_empty() { String::new() } else { format!(" ({})", m.sni_label) };
+                    @let size = if m.size_class == "TOT" { c.t("bench.all_sizes").to_string() } else { c.tf("bench.size", &[&m.size_class.replace("001", "0")]) };
+                    p.note { (c.tf("bench.note.real", &[m.sni_code.as_str(), &label, &size, m.year.as_str()])) }
+                }
+            } @else if latest.is_some() {
+                p.note { (c.t("bench.none")) }
+            }
+            p.note { (c.t("sum.live.note")) }
+        }
+    }
+}
+
+/// Valoración y cifras reales de las cuentas anuales: tarjeta de riesgo, resumen del último año, gráfico y tabla.
+/// `fin = None` = la empresa no ha presentado cuentas anuales digitales.
+pub fn financials_fragment(c: &Ctx, org: &Organisation, fin: Option<&Financials>, medians: Option<&SectorMedians>) -> Markup {
+    let usable = fin.filter(|f| f.latest().is_some());
+    html! {
+        (assessment_card(c, org, usable, medians))
+        div.card.mt-4 {
+            h2.card-title {
+                (c.t("live.financials"))
+                (info_btn(c.t("live.about_financials"), c.t("live.financials_tip")))
+            }
+            @if let Some(fin) = usable {
+                (financials_body(c, fin))
+            } @else {
+                p.muted { (c.t("bok.none")) }
+                p.note { (c.t("bok.none_note")) }
+            }
+        }
+    }
+}
+
+/// Cifras del último año, gráfico de facturación y tabla de cinco ejercicios.
+fn financials_body(c: &Ctx, fin: &Financials) -> Markup {
+    let latest = fin.latest().expect("la llamada comprueba que hay un ejercicio");
     let unit = c.t("unit.tkr");
     let money = |v: Option<i64>| v.map(|n| c.money(n)).unwrap_or_else(|| "—".to_string());
     let chart: Vec<(&str, i64)> = fin.years.iter().filter_map(|y| y.revenue.map(|r| (y.label.as_str(), r))).collect();

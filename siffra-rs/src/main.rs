@@ -3,6 +3,7 @@
 //! Servidor Axum con HTML renderizado en servidor (maud), en español, inglés y sueco. Acceso con cuentas
 //! (superadmin, admin, user) guardadas en SQLite y registro de actividad que solo ve el superadmin.
 
+mod analysis;
 mod annual_report;
 mod app;
 mod auth;
@@ -286,6 +287,7 @@ async fn main() -> std::io::Result<()> {
         println!("AVISO: no hay cuentas. Crea la primera con: siffra-rs user-add --role superadmin --name \"Nombre\" --username admin");
     }
     let mut state = AppState::new(db.clone());
+    state.demo = std::env::var("SIFFRA_DEMO").is_ok_and(|v| v == "1");
     state.force_secure = std::env::var("SIFFRA_SECURE_COOKIES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
     // Búsqueda por nombre: índice del archivo oficial de Bolagsverket. Con SIFFRA_REGISTRY_REFRESH=1 el servidor lo

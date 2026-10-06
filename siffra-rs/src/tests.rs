@@ -116,7 +116,8 @@ struct Fx {
 }
 
 fn fx() -> Fx {
-    let st = AppState::new(Db::memory());
+    let mut st = AppState::new(Db::memory());
+    st.demo = true; // casi todas las pruebas usan las empresas de EJEMPLO
     let sa = seed(&st, Role::Superadmin, None, Some("architechia"), "Architechia", false);
     let admin = seed(&st, Role::Admin, Some("freddy.orozco@architechia.co"), None, "Freddy Orozco", false);
     let user = seed(&st, Role::User, Some("testing@architechia.co"), None, "Testing", false);
@@ -1148,6 +1149,11 @@ async fn live_bolagsverket_flow_with_fake_api() {
         "Eget kapital",
         "Summa tillgångar",
         "senaste räkenskapsår slutade 2025-12-31",
+        "Finansiell bedömning",
+        "Baserat på räkenskapsåret 2025",
+        "Hög risk",
+        "Pågående förfarande enligt registret: Konkurs (sedan 2024-01-26)",
+        "Resultatet blev en förlust på 46 tkr",
     ] {
         assert!(frag.body.contains(needle), "el fragmento no contiene {needle:?}");
     }
@@ -1160,7 +1166,12 @@ async fn live_bolagsverket_flow_with_fake_api() {
     assert!(!again.body.contains("data-fragment"), "ya en caché: sin carga diferida");
     assert!(again.body.contains("Omsättning 2025") && again.body.contains("Årsredovisning"));
     // Una empresa real sin cuentas digitales: mensaje claro en vez de cifras.
-    assert!(views::financials_fragment(&Ctx::new(Lang::Sv), None).into_string().contains("inte lämnat in någon digital årsredovisning"));
+    let sample_org = bolagsverket::map_organisation(&serde_json::from_str::<Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap(), "5299999994").unwrap();
+    let none = views::financials_fragment(&Ctx::new(Lang::Sv), &sample_org, None, None).into_string();
+    assert!(none.contains("inte lämnat in någon digital årsredovisning"));
+    // Esta empresa de prueba está en konkurs: aunque no haya cuentas, el procedimiento la deja en riesgo alto.
+    assert!(none.contains("Hög risk") && none.contains("Pågående förfarande enligt registret: Konkurs (sedan 2024-01-26)"), "{none}");
+    assert!(none.contains("Ingen digital årsredovisning"));
     // Una de EJEMPLO no pasa por este fragmento.
     assert_eq!(live("/foretag/559012-3456/bokslut").await.status, StatusCode::NOT_FOUND);
     // Buscador: un organisationsnummer real que no es de ejemplo.
@@ -1313,4 +1324,89 @@ async fn weekly_refresh_downloads_imports_and_swaps_the_index() {
     }
     drop(reg);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ───────────────────────── Modo real (sin datos de ejemplo) ─────────────────────────
+
+/// Como `fx()` pero con el modo demo apagado, que es lo normal en producción.
+fn fx_real() -> Fx {
+    let mut f = fx();
+    f.st.demo = false;
+    f
+}
+
+#[tokio::test]
+async fn without_demo_mode_there_are_no_fictional_companies_or_screens() {
+    let f = fx_real();
+    // Portada del buscador: invitación a buscar y empresas reales conocidas, sin lista ni nota de ejemplo.
+    let r = f.get(&f.user_s, "/sok?lang=es").await;
+    assert_eq!(r.status, StatusCode::OK);
+    for needle in ["Busca una empresa sueca", "Prueba con:", "Volvo", "Spotify", "Los datos son reales"] {
+        assert!(r.body.contains(needle), "falta {needle:?}");
+    }
+    for banned in ["Nordlys", "Fjällbruk", "Kvarn", "EJEMPLO", "Datos de demostración", "<tbody"] {
+        assert!(!r.body.contains(banned), "no debería aparecer {banned:?}");
+    }
+    // El menú solo lleva el buscador (y la administración que corresponda); la barra del móvil se oculta.
+    assert!(r.body.contains(r#"class="side-nav single""#));
+    for hidden in ["/bevakning", "/likviditet", "/sie", "/fakturor"] {
+        assert!(!r.body.contains(&format!(r#"href="{hidden}""#)), "{hidden} sigue en el menú");
+        assert_eq!(f.get(&f.user_s, hidden).await.status, StatusCode::NOT_FOUND, "{hidden}");
+    }
+    // Las empresas de ejemplo no existen: ni la ficha ni sus fragmentos.
+    assert_eq!(f.get(&f.user_s, "/foretag/559012-3456").await.status, StatusCode::NOT_FOUND);
+    assert_eq!(f.get(&f.user_s, "/foretag/559012-3456/benchmarks").await.status, StatusCode::NOT_FOUND);
+    // Buscar un nombre de ejemplo no devuelve nada, y el estado vacío propone búsquedas reales.
+    let q = f.get(&f.user_s, "/sok?q=nordlys&lang=es").await.body;
+    assert!(q.contains("Sin resultados") && !q.contains("Nordlys Logistik"));
+    assert!(q.contains(r#"href="/sok?q=Volvo""#));
+    // En modo demo, en cambio, todo sigue ahí.
+    let demo = fx();
+    assert!(demo.get(&demo.user_s, "/sok?q=nordlys").await.body.contains("Nordlys Logistik AB"));
+    assert_eq!(demo.get(&demo.user_s, "/bevakning").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn real_mode_pages_have_no_missing_translations_and_search_by_name_still_works() {
+    let mut f = fx_real();
+    let path = with_registry(&mut f, crate::registry::tests::SAMPLE);
+    for lang in Lang::ALL {
+        for url in ["/sok", "/sok?q=fjallbruk", "/sok?q=zzzzz", "/no-existe"] {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            let r = f.get(&f.sa_s, &format!("{url}{sep}lang={}", lang.code())).await;
+            assert!(!r.body.contains('⟦'), "{lang:?} {url}");
+        }
+    }
+    let r = f.get(&f.user_s, "/sok?q=fjallbruk&lang=es").await.body;
+    assert!(r.contains(r#"href="/foretag/5560000027""#) && r.contains("Resultados del registro de empresas"));
+    assert!(!r.contains("Datos de demostración"), "sin modo demo no hay nota de ejemplo");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn demo_flag_is_off_unless_asked_for() {
+    let st = AppState::new(Db::memory());
+    assert!(!st.demo, "producción no debe arrancar con datos ficticios");
+}
+
+#[test]
+fn assessment_numbers_are_rounded_and_the_summary_reads_well() {
+    use crate::annual_report::{FinancialYear, Financials};
+    use crate::scb::SectorMedians;
+    let mut org = bolagsverket::map_organisation(&serde_json::from_str::<serde_json::Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap(), "5299999994").unwrap();
+    org.forfaranden.clear();
+    org.avregistreringsdatum = None;
+    org.aktiv = true;
+    let year = |label: &str, revenue, result, equity, assets| FinancialYear { period_end: format!("{label}-12-31"), label: label.into(), revenue: Some(revenue), result: Some(result), equity: Some(equity), assets: Some(assets) };
+    let fin = Financials { years: vec![year("2024", 2_615, 190, 580, 2_100), year("2025", 2_519, 176, 600, 2_150)] };
+    let med = SectorMedians { margin: 18.2, solidity: 68.0, liquidity: 294.0, year: "2024".into(), sni_code: "71.121".into(), sni_label: "Tekniska konsultbyråer".into(), size_class: "TOT".into(), exact_sni: true, exact_size: false };
+
+    let es = views::financials_fragment(&Ctx::new(Lang::Es), &org, Some(&fin), Some(&med)).into_string();
+    assert!(!es.contains("6,98") && !es.contains("27,90"), "las barras no enseñan decimales de más");
+    assert!(es.contains("La solidez es del 27,9\u{a0}%, por debajo de la mediana del sector (68,0\u{a0}%)."), "gramática del resumen en español");
+    assert!(es.contains("Riesgo bajo"), "27,9 % de solidez y 7 % de margen no son débiles por sí solos: sin alerta");
+    assert!(es.contains("En 2025 la facturación fue de 2.519 mil SEK, un 3,7\u{a0}% menos que en 2024."));
+    let sv = views::financials_fragment(&Ctx::new(Lang::Sv), &org, Some(&fin), Some(&med)).into_string();
+    assert!(sv.contains("Soliditeten är 27,9\u{a0}%, under branschens median (68,0\u{a0}%)."));
+    assert!(sv.contains("Låg risk"));
 }

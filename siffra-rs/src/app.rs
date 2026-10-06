@@ -25,11 +25,13 @@ pub struct AppState {
     pub force_secure: bool,
     /// Índice de nombres de empresas (archivo oficial de Bolagsverket); vacío si no se ha cargado.
     pub registry: Arc<RegistryHandle>,
+    /// Modo demo (`SIFFRA_DEMO=1`): activa las empresas y pantallas de EJEMPLO (datos ficticios). Apagado por defecto.
+    pub demo: bool,
 }
 
 impl AppState {
     pub fn new(db: Db) -> AppState {
-        AppState { db, limiter: Arc::new(Limiter::new()), force_secure: false, registry: RegistryHandle::none() }
+        AppState { db, limiter: Arc::new(Limiter::new()), force_secure: false, registry: RegistryHandle::none(), demo: false }
     }
 }
 
@@ -44,11 +46,12 @@ pub struct ReqInfo {
     pub ua: String,
     pub https: bool,
     pub session_token: Option<String>,
+    pub demo: bool,
 }
 
 impl ReqInfo {
     pub fn ctx(&self) -> Ctx {
-        Ctx { lang: self.lang, user: self.user.clone(), path: self.path.clone(), query: self.query.clone(), csrf: self.csrf.clone() }
+        Ctx { lang: self.lang, user: self.user.clone(), path: self.path.clone(), query: self.query.clone(), csrf: self.csrf.clone(), demo: self.demo }
     }
 
     pub fn csrf_ok(&self, token: &str) -> bool {
@@ -192,7 +195,7 @@ pub async fn session_mw(State(st): State<AppState>, mut req: Request, next: Next
         _ => None,
     };
 
-    let info = Arc::new(ReqInfo { user, lang, path: path.clone(), query: query.clone(), csrf, ip, ua, https, session_token: token });
+    let info = Arc::new(ReqInfo { user, lang, path: path.clone(), query: query.clone(), csrf, ip, ua, https, session_token: token, demo: st.demo });
     let secure = info.secure_cookie(&st);
     if let Some(detail) = lang_change {
         log_event(&st, &info, "lang_change", method.as_str(), 200, &detail);

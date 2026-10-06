@@ -11,6 +11,7 @@
 //! (52.290 → 52.29 → 52.2 → 52) y, si no hay datos para ese tamaño, al total de tamaños.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,9 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 type CacheMap = HashMap<String, (Instant, Option<SectorMedians>)>;
+/// SCB retiró la versión en inglés de la tabla (responde "Non-existent table"): una vez visto, se consulta directamente en sueco.
+static ENGLISH_VERSION_GONE: AtomicBool = AtomicBool::new(false);
+
 static CACHE: LazyLock<Mutex<CacheMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn base_url() -> String {
@@ -68,19 +72,11 @@ pub fn enabled() -> bool {
 
 /// "52.290 Övriga…" → ["52.290", "52.29", "52.2", "52"] (del más específico al más general).
 pub fn sni_candidates(sni: &str) -> Vec<String> {
-    let s = sni.trim();
-    let head: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if head.len() != 2 {
+    // Acepta "52.290 Övriga…" (con punto, como en SCB) y "52290" (sin punto, como lo entrega Bolagsverket).
+    let digits: String = sni.trim().chars().take_while(|c| c.is_ascii_digit() || *c == '.').filter(char::is_ascii_digit).take(5).collect();
+    if digits.len() < 2 {
         return vec![];
     }
-    let rest: String = s[2..]
-        .strip_prefix('.')
-        .unwrap_or(&s[2..])
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .take(3)
-        .collect();
-    let digits = format!("{head}{rest}");
     (2..=digits.len())
         .rev()
         .map(|len| {
@@ -135,26 +131,42 @@ pub fn parse_medians(json: &Value, sni: &str, size_class: &str) -> Option<Sector
 /// `Ok(None)` = SCB no tiene ese dato (código inexistente o celda suprimida). `Err` si SCB falla.
 async fn fetch_medians(sni: &str, size_class: &str, lang: Lang) -> Result<Option<SectorMedians>, String> {
     let contents = [CODE_MARGIN, CODE_SOLIDITY, CODE_LIQUIDITY].join(",");
-    let res = CLIENT
-        .get(format!("{}/tables/{TABLE}/data", base_url()))
-        .query(&[
-            ("lang", lang.scb_lang()),
-            ("outputFormat", "json-stat2"),
-            ("valueCodes[SNI2007]", sni),
-            ("valueCodes[Storleksklass]", size_class),
-            ("valueCodes[AKvartil]", "Med"),
-            ("valueCodes[ContentsCode]", contents.as_str()),
-            ("valueCodes[Tid]", "top(1)"),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("SCB: no se pudo consultar {TABLE} ({sni}, {size_class}): {e}"))?;
-
-    let status = res.status();
-    // 400 "Non-existent value": ese código SNI / tamaño no existe en la tabla.
-    if status.as_u16() == 400 || status.as_u16() == 404 {
-        return Ok(None);
+    let mut api_lang = lang.scb_lang();
+    if api_lang == "en" && ENGLISH_VERSION_GONE.load(Ordering::Relaxed) {
+        api_lang = "sv";
     }
+    let res = loop {
+        let res = CLIENT
+            .get(format!("{}/tables/{TABLE}/data", base_url()))
+            .query(&[
+                ("lang", api_lang),
+                ("outputFormat", "json-stat2"),
+                ("valueCodes[SNI2007]", sni),
+                ("valueCodes[Storleksklass]", size_class),
+                ("valueCodes[AKvartil]", "Med"),
+                ("valueCodes[ContentsCode]", contents.as_str()),
+                ("valueCodes[Tid]", "top(1)"),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("SCB: no se pudo consultar {TABLE} ({sni}, {size_class}): {e}"))?;
+        let status = res.status().as_u16();
+        // 400/404 "Non-existent value": ese código SNI / tamaño no existe en la tabla.
+        // 400/404 "Non-existent table": esa versión de idioma de la tabla no existe (SCB retiró la inglesa).
+        if status == 400 || status == 404 {
+            let body = res.text().await.unwrap_or_default();
+            if api_lang != "sv" && body.contains("Non-existent table") {
+                if !ENGLISH_VERSION_GONE.swap(true, Ordering::Relaxed) {
+                    eprintln!("SCB: la tabla {TABLE} ya no existe en inglés; se consulta en sueco.");
+                }
+                api_lang = "sv";
+                continue;
+            }
+            return Ok(None);
+        }
+        break res;
+    };
+    let status = res.status();
     if !status.is_success() {
         return Err(format!("SCB: error HTTP {status} al consultar {TABLE} ({sni}, {size_class})."));
     }
@@ -223,6 +235,9 @@ mod tests {
         assert_eq!(sni_candidates("52.290 Övriga stödtjänster"), ["52.290", "52.29", "52.2", "52"]);
         assert_eq!(sni_candidates("47.290 x"), ["47.290", "47.29", "47.2", "47"]);
         assert_eq!(sni_candidates("47.2"), ["47.2", "47"]);
+        assert_eq!(sni_candidates("71121"), ["71.121", "71.12", "71.1", "71"], "Bolagsverket da el código sin punto");
+        assert_eq!(sni_candidates("5229"), ["52.29", "52.2", "52"]);
+        assert!(sni_candidates("7").is_empty());
         assert!(sni_candidates("zz").is_empty());
         assert!(sni_candidates("").is_empty());
     }
@@ -262,6 +277,52 @@ mod tests {
         assert!(parse_medians(&j, "52.290", "10-19").is_none());
         j["value"] = json!([]);
         assert!(parse_medians(&j, "52.290", "10-19").is_none());
+    }
+
+
+    /// SCB retiró la versión en inglés de TAB1270 (pedirla da "Non-existent table") y las medianas dejaron de
+    /// salir, en silencio, para quien usa español o inglés. Contra un SCB simulado: se reintenta en sueco y, una
+    /// vez visto, ya no se vuelve a pedir en inglés.
+    #[tokio::test]
+    async fn falls_back_to_swedish_when_the_english_table_is_gone() {
+        use axum::extract::Query;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use std::sync::atomic::AtomicUsize;
+        static ENGLISH_HITS: AtomicUsize = AtomicUsize::new(0);
+
+        async fn data(Query(q): Query<HashMap<String, String>>) -> axum::response::Response {
+            if q.get("lang").map(String::as_str) == Some("en") {
+                ENGLISH_HITS.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"type":"Parameter error","title":"Non-existent table","status":404}"#;
+                return (StatusCode::BAD_REQUEST, [("content-type", "application/json")], body).into_response();
+            }
+            let sni = q.get("valueCodes[SNI2007]").cloned().unwrap_or_default();
+            let body = json!({
+                "dimension": {
+                    "SNI2007": {"category": {"index": {sni.clone(): 0}, "label": {sni.clone(): "Teknisk konsultverksamhet"}}},
+                    "ContentsCode": {"category": {"index": {"0000032H": 0, "00000340": 1, "00000343": 2}}},
+                    "Tid": {"category": {"index": {"2024": 0}}}
+                },
+                "value": [4.5, 38, 130]
+            });
+            axum::Json(body).into_response()
+        }
+        let app = axum::Router::new().route("/tables/TAB1270/data", axum::routing::get(data));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        std::env::set_var("SCB_STATS_BASE_URL", format!("http://{addr}"));
+
+        let m = get_sector_medians("71.121 x", "", Lang::En).await.unwrap().expect("las medianas salen aunque la tabla inglesa no exista");
+        assert_eq!((m.margin, m.solidity, m.sni_code.as_str()), (4.5, 38.0, "71.121"));
+        assert!(m.exact_sni);
+        assert_eq!(ENGLISH_HITS.load(Ordering::SeqCst), 1, "el primer intento en inglés falla una sola vez");
+        // Español también (usa la versión inglesa de SCB) y sin volver a pedir inglés.
+        let es = get_sector_medians("62.010 x", "", Lang::Es).await.unwrap().unwrap();
+        assert_eq!(es.solidity, 38.0);
+        assert_eq!(ENGLISH_HITS.load(Ordering::SeqCst), 1, "ya se sabe que la tabla inglesa no existe");
+        std::env::remove_var("SCB_STATS_BASE_URL");
     }
 
     /// Contra el API real de SCB: `cargo test -- --ignored`.

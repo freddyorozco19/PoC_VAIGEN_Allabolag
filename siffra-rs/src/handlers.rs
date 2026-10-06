@@ -84,7 +84,7 @@ pub async fn sok(State(st): State<AppState>, Extension(info): Info, Query(p): Qu
     let q = p.q.as_deref().unwrap_or("");
     // Un organisationsnummer que no es de EJEMPLO se busca en Bolagsverket (si hay credenciales).
     // Este API solo consulta por número, no por nombre.
-    let live = if model::search_example_companies(q).is_empty() && bolagsverket::configured() {
+    let live = if (!c.demo || model::search_example_companies(q).is_empty()) && bolagsverket::configured() {
         match bolagsverket::normalize_org_number(q) {
             Some(n) => match bolagsverket::get_organisation_by_number(&n).await {
                 Ok(o) => Some(o),
@@ -123,6 +123,22 @@ pub struct CompanyParams {
     tab: Option<String>,
 }
 
+/// Código SNI principal de la empresa (el primero que declara), si lo hay y SCB lo entiende.
+fn main_sni(o: &bolagsverket::Organisation) -> Option<&str> {
+    o.sni.first().map(|(code, _)| code.as_str()).filter(|code| !scb::sni_candidates(code).is_empty())
+}
+
+/// Cuentas y medianas del sector ya en caché. `None` si falta alguna: la ficha sale entonces con un esqueleto y
+/// el navegador pide `/foretag/:org/bokslut`, que las busca (descargar las cuentas tarda varios segundos).
+fn cached_analysis_inputs(o: &bolagsverket::Organisation, lang: crate::i18n::Lang) -> Option<(Option<annual_report::Financials>, Option<scb::SectorMedians>)> {
+    let fin = annual_report::peek(&o.organisationsnummer)?;
+    let medians = match main_sni(o) {
+        Some(code) if scb::enabled() => scb::peek(code, "", lang)?,
+        _ => None,
+    };
+    Some((fin, medians))
+}
+
 /// Empresa que no es de EJEMPLO: ficha real de Bolagsverket si hay credenciales; si no, 404.
 async fn live_company(c: &Ctx, org: &str) -> Response {
     if !bolagsverket::configured() {
@@ -132,8 +148,8 @@ async fn live_company(c: &Ctx, org: &str) -> Response {
         Ok(o) => {
             // Las cuentas anuales requieren descargar y leer hasta 3 informes (varios segundos): si no están
             // en caché, la ficha sale al instante con un esqueleto y el navegador pide `/foretag/:org/bokslut`.
-            let fin = match annual_report::peek(&o.organisationsnummer) {
-                Some(f) => views::FinState::Ready(f),
+            let fin = match cached_analysis_inputs(&o, c.lang) {
+                Some((f, m)) => views::FinState::Ready(f, m),
                 None => views::FinState::Pending,
             };
             html(views::live_profile_page(c, &o, &fin))
@@ -155,7 +171,7 @@ async fn live_company(c: &Ctx, org: &str) -> Response {
 
 pub async fn company(Extension(info): Info, Path(org): Path<String>, Query(p): Query<CompanyParams>) -> Response {
     let c = info.ctx();
-    match model::find_example_company(&org) {
+    match model::find_example_company(&org).filter(|_| info.demo) {
         Some(co) => {
             // Medianas reales del sector (SCB). Si ya están en caché la ficha sale completa al instante;
             // si no, sale con un esqueleto y el navegador pide el fragmento.
@@ -176,30 +192,44 @@ pub async fn company(Extension(info): Info, Path(org): Path<String>, Query(p): Q
 /// Fragmento HTML con las cifras de las cuentas anuales de una empresa real (lo pide la ficha en segundo plano).
 pub async fn company_bokslut(Extension(info): Info, Path(org): Path<String>) -> Response {
     let c = info.ctx();
-    if model::find_example_company(&org).is_some() || !bolagsverket::configured() {
+    if (info.demo && model::find_example_company(&org).is_some()) || !bolagsverket::configured() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match annual_report::get_financials(&org).await {
-        Ok(f) => html(views::financials_fragment(&c, f.as_ref())),
-        Err(e @ (bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_))) => {
+    // Registro (nombre, SNI, procedimientos) y cuentas anuales a la vez; después, la mediana del sector (SCB).
+    let (org_res, fin_res) = tokio::join!(bolagsverket::get_organisation_by_number(&org), annual_report::get_financials(&org));
+    let bv_status = |e: &bolagsverket::BvError| match e {
+        bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_) => StatusCode::NOT_FOUND,
+        bolagsverket::BvError::Upstream { status: Some(429), .. } => StatusCode::TOO_MANY_REQUESTS,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    let o = match org_res {
+        Ok(o) => o,
+        Err(e) => {
             eprintln!("{e}"); // visible en el registro: un rechazo silencioso ocultó un fallo real
-            StatusCode::NOT_FOUND.into_response()
+            return bv_status(&e).into_response();
         }
+    };
+    let fin = match fin_res {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("{e}");
-            let status = match e {
-                bolagsverket::BvError::Upstream { status: Some(429), .. } => StatusCode::TOO_MANY_REQUESTS,
-                _ => StatusCode::BAD_GATEWAY,
-            };
-            status.into_response()
+            return bv_status(&e).into_response();
         }
-    }
+    };
+    let medians = match main_sni(&o) {
+        Some(code) if scb::enabled() => scb::get_sector_medians(code, "", c.lang).await.unwrap_or_else(|e| {
+            eprintln!("{e}");
+            None
+        }),
+        _ => None,
+    };
+    html(views::financials_fragment(&c, &o, fin.as_ref(), medians.as_ref()))
 }
 
 /// Fragmento HTML con la comparación con el sector (lo pide la ficha cuando SCB aún no estaba en caché).
 pub async fn company_benchmarks(Extension(info): Info, Path(org): Path<String>) -> Response {
     let c = info.ctx();
-    let Some(co) = model::find_example_company(&org) else {
+    let Some(co) = model::find_example_company(&org).filter(|_| info.demo) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let (medians, notice) = if scb::enabled() {
@@ -217,18 +247,30 @@ pub async fn company_benchmarks(Extension(info): Info, Path(org): Path<String>) 
 }
 
 pub async fn bevakning(Extension(info): Info) -> Response {
+    if !info.demo {
+        return html_status(StatusCode::NOT_FOUND, views::not_found_page(&info.ctx()));
+    }
     html(views::bevakning_page(&info.ctx()))
 }
 
 pub async fn likviditet(Extension(info): Info) -> Response {
+    if !info.demo {
+        return html_status(StatusCode::NOT_FOUND, views::not_found_page(&info.ctx()));
+    }
     html(views::likviditet_page(&info.ctx()))
 }
 
 pub async fn sie(Extension(info): Info) -> Response {
+    if !info.demo {
+        return html_status(StatusCode::NOT_FOUND, views::not_found_page(&info.ctx()));
+    }
     html(views::sie_page(&info.ctx()))
 }
 
 pub async fn fakturor(Extension(info): Info) -> Response {
+    if !info.demo {
+        return html_status(StatusCode::NOT_FOUND, views::not_found_page(&info.ctx()));
+    }
     html(views::fakturor_page(&info.ctx()))
 }
 

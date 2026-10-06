@@ -36,6 +36,34 @@ cargo test -- --ignored   # prueba contra el API real de SCB (requiere red)
 
 Requiere Rust estable (probado con 1.99). Las tipografías se cargan desde Google Fonts. Para entrar en local, crea una cuenta: `SIFFRA_DB=siffra.db cargo run -- user-add --role superadmin --name "Yo" --username admin`.
 
+## Valoración financiera y modo demo
+
+Las empresas reales (cualquier número de organización o nombre del registro) tienen en su ficha una **valoración
+financiera** calculada con datos reales (`src/analysis.rs`): cuentas anuales digitales de Bolagsverket, mediana del
+sector de SCB y estado en el registro. Son reglas simples y explicables, no un modelo; el nivel es la peor de las señales:
+
+| Nivel | Señales |
+|---|---|
+| Riesgo alto | procedimiento en curso (konkurs, likvidation…), patrimonio neto negativo, pérdidas dos ejercicios seguidos, solidez < 10 % |
+| En observación | pérdida en el último ejercicio, caída de facturación ≥ 10 %, último informe con más de 18 meses, baja del registro, solidez o margen por debajo del sector **y además débiles** (solidez < 20 %, margen < 2 %) |
+| Riesgo bajo | ninguna de las anteriores (más señales favorables: facturación creciente, beneficios 3+ años seguidos, por encima del sector) |
+| Sin valorar | sin cuentas digitales con cifras (muchas grandes cotizadas no las presentan en ese formato) |
+
+Una cifra por debajo de la mediana del sector **no** alerta por sí sola (la mediana de solidez la arrastran las sociedades
+holding: una pyme con 28 % frente a 68 % no está en apuros); el gráfico enseña la comparación sin veredicto. No se
+valora la liquidez (las cuentas leídas no traen activo ni pasivo corriente) ni la plantilla (la API no la da). El
+resumen en lenguaje natural lo escriben plantillas del catálogo con las cifras reales; **no usa ningún modelo de IA**.
+Todo es orientativo y no asesoramiento financiero.
+
+**Modo demo** (`SIFFRA_DEMO=1`, apagado por defecto y en producción): activa las 3 empresas ficticias y las pantallas
+de maqueta (vigilancia, liquidez, SIE, facturas). Sin él esas rutas dan 404, el menú solo lleva el buscador y la portada
+invita a buscar (Volvo, Spotify, Ericsson, 556703-7485).
+
+**Medianas del sector (SCB):** consulta la tabla `TAB1270`. SCB retiró su versión en inglés (`lang=en` responde
+"Non-existent table"); la aplicación lo detecta y pide en sueco. El código SNI de Bolagsverket llega sin punto
+(`71121`) y se convierte a `71.121`, `71.12`, `71.1`, `71` hasta encontrar datos. Como no se conoce la plantilla, se usa la
+mediana de todos los tamaños.
+
 ## Cuentas, roles e idiomas
 
 La aplicación exige iniciar sesión (nginx ya no pide clave). Las cuentas, las sesiones y el registro de actividad viven en

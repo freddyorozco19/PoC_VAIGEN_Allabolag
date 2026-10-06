@@ -1355,3 +1355,14 @@ kbd {
 /* Resultados del registro: las empresas dadas de baja se atenúan; sin ficha, el nombre no es un enlace */
 .dim .company-link, .dim .company-plain { color: var(--ink2); font-weight: 500; }
 .company-plain { font-weight: 600; color: var(--ink); }
+
+/* Fuera del modo demo solo hay una pantalla en el menú: la barra inferior del móvil sobra (el logo lleva al buscador). */
+.side-nav.single { display: none; }
+@media (min-width: 768px) { .side-nav.single { display: flex; } }
+.chips-left { justify-content: flex-start; margin-top: var(--s2); }
+.intro p + p { margin-top: var(--s2); }
+.intro-try { font-size: 0.875rem; }
+
+/* Valoración financiera de una empresa real */
+.assess-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-bottom: var(--s3); font-size: 0.875rem; }
+.subtitle { margin: var(--s5) 0 var(--s2); font-size: 0.8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink2); }
