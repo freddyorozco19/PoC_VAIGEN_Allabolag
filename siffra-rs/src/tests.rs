@@ -732,6 +732,7 @@ async fn language_choice_is_stored_in_the_profile_and_used_on_next_login() {
 
 #[tokio::test]
 async fn pages_are_fully_translated_in_each_language() {
+    let _env = lock_bolagsverket_env(); // pide una empresa inexistente: sin claves da 404, con otra prueba activa no
     let f = fx();
     let titles = [(Lang::Es, "Buscar empresas"), (Lang::En, "Search companies"), (Lang::Sv, "Sök företag")];
     for (lang, title) in titles {
@@ -929,7 +930,6 @@ async fn unknown_company_is_404() {
 async fn static_pages_render() {
     let f = fx();
     for (path, needle) in [
-        ("/bevakning", "Förlust redovisad i senaste rapporten"),
         ("/likviditet", "Likviditetsprognos"),
         ("/sie", "Släpp en SIE-fil här"),
         ("/fakturor", "Hamnkraft Test AB"),
@@ -1347,9 +1347,11 @@ async fn without_demo_mode_there_are_no_fictional_companies_or_screens() {
     for banned in ["Nordlys", "Fjällbruk", "Kvarn", "EJEMPLO", "Datos de demostración", "<tbody"] {
         assert!(!r.body.contains(banned), "no debería aparecer {banned:?}");
     }
-    // El menú solo lleva el buscador (y la administración que corresponda); la barra del móvil se oculta.
-    assert!(r.body.contains(r#"class="side-nav single""#));
-    for hidden in ["/bevakning", "/likviditet", "/sie", "/fakturor"] {
+    // El menú lleva el buscador y las pantallas reales (Mis empresas, Comparar, Historial); las maquetas no.
+    for real in ["/sok", "/bevakning", "/comparar", "/historial"] {
+        assert!(r.body.contains(&format!(r#"href="{real}""#)), "{real} falta en el menú");
+    }
+    for hidden in ["/likviditet", "/sie", "/fakturor"] {
         assert!(!r.body.contains(&format!(r#"href="{hidden}""#)), "{hidden} sigue en el menú");
         assert_eq!(f.get(&f.user_s, hidden).await.status, StatusCode::NOT_FOUND, "{hidden}");
     }
@@ -1409,4 +1411,213 @@ fn assessment_numbers_are_rounded_and_the_summary_reads_well() {
     let sv = views::financials_fragment(&Ctx::new(Lang::Sv), &org, Some(&fin), Some(&med)).into_string();
     assert!(sv.contains("Soliditeten är 27,9\u{a0}%, under branschens median (68,0\u{a0}%)."));
     assert!(sv.contains("Låg risk"));
+}
+
+// ───────────────────────── Mis empresas, Comparar, Historial ─────────────────────────
+
+/// (Comparte token y credenciales con la prueba del flujo completo: el token se guarda en caché en todo el proceso.)
+/// Bolagsverket simulado: sirve la empresa de ejemplo del API oficial (en konkurs) para cualquiera de los dos
+/// números y ninguna cuenta anual. Devuelve su dirección; hay que llevar el cerrojo de las variables BOLAGSVERKET_*.
+async fn fake_bolagsverket() -> std::net::SocketAddr {
+    use axum::http::HeaderMap;
+    use axum::{Form, Json};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    async fn token(Form(_): Form<HashMap<String, String>>) -> Response {
+        Json(json!({ "access_token": "tok-123", "expires_in": 3600 })).into_response()
+    }
+    async fn orgs(headers: HeaderMap, Json(body): Json<Value>) -> Response {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer tok-123") {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        match body["identitetsbeteckning"].as_str() {
+            Some("5567037485" | "5560125790" | "5569000010" | "5569000028") => Json(serde_json::from_str::<Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap()).into_response(),
+            _ => Json(serde_json::from_str::<Value>(bolagsverket::fixtures::FINNS_EJ).unwrap()).into_response(),
+        }
+    }
+    async fn docs(Json(_): Json<Value>) -> Response {
+        Json(json!({ "dokument": [] })).into_response()
+    }
+    let app = Router::new()
+        .route("/oauth2/token", post(token))
+        .route("/vardefulla-datamangder/v1/organisationer", post(orgs))
+        .route("/vardefulla-datamangder/v1/dokumentlista", post(docs));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::set_var("BOLAGSVERKET_CLIENT_ID", "test-id");
+    std::env::set_var("BOLAGSVERKET_CLIENT_SECRET", "test-secret");
+    std::env::set_var("BOLAGSVERKET_BASE_URL", format!("http://{addr}/vardefulla-datamangder/v1"));
+    addr
+}
+
+fn unset_bolagsverket_env() {
+    for k in ["BOLAGSVERKET_CLIENT_ID", "BOLAGSVERKET_CLIENT_SECRET", "BOLAGSVERKET_BASE_URL"] {
+        std::env::remove_var(k);
+    }
+}
+
+#[tokio::test]
+async fn my_companies_follow_review_change_and_unfollow() {
+    let _env = lock_bolagsverket_env();
+    fake_bolagsverket().await;
+    let f = fx();
+    let org = "5569000010";
+
+    // Vacía al principio, con su invitación.
+    let r = f.get(&f.user_s, "/bevakning?lang=es").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Aún no sigues ninguna empresa"));
+
+    // La ficha ofrece seguirla; seguir exige el token CSRF.
+    let ficha = f.get(&f.user_s, &format!("/foretag/{org}?lang=es")).await.body;
+    assert!(ficha.contains("Seguir empresa") && ficha.contains(r#"action="/bevakning/add""#));
+    let no_csrf = f.post_no_csrf(&f.user_s, "/bevakning/add", &[("orgnr", org)]).await;
+    assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+    assert_eq!(f.st.db.watch_count(f.user.id), 0);
+
+    let added = f.post(&f.user_s, "/bevakning/add", &[("orgnr", org), ("next", &format!("/foretag/{org}"))]).await;
+    assert_eq!((added.status, added.location().as_deref()), (StatusCode::SEE_OTHER, Some("/foretag/5569000010")));
+    assert!(f.st.db.watch_has(f.user.id, org));
+    // Seguirla dos veces no la duplica.
+    f.post(&f.user_s, "/bevakning/add", &[("orgnr", org)]).await;
+    assert_eq!(f.st.db.watch_count(f.user.id), 1);
+    let ficha = f.get(&f.user_s, &format!("/foretag/{org}?lang=es")).await.body;
+    assert!(ficha.contains("Dejar de seguir") && ficha.contains(r#"action="/bevakning/remove""#));
+
+    // En la lista: nombre real, enlace, y "pendiente" hasta la primera revisión.
+    let list = f.get(&f.user_s, "/bevakning?lang=es").await.body;
+    assert!(list.contains("Cykelbolaget AB") && list.contains(&format!(r#"href="/foretag/{org}""#)) && list.contains("556900-0010"));
+    assert!(list.contains("Pendiente de revisar"));
+    // Cada persona ve solo las suyas.
+    assert!(f.get(&f.admin_s, "/bevakning?lang=es").await.body.contains("Aún no sigues ninguna empresa"));
+
+    // Revisión: la empresa está en konkurs → riesgo alto y estado "En procedimiento".
+    let refreshed = f.post(&f.user_s, "/bevakning/refresh", &[("orgnr", "all")]).await;
+    assert_eq!(refreshed.location().as_deref(), Some("/bevakning?ok=refreshed&n=1"));
+    let list = f.get(&f.user_s, "/bevakning?ok=refreshed&n=1&lang=es").await.body;
+    assert!(list.contains("Se actualizaron 1 empresas.") && list.contains("Riesgo alto") && list.contains("En procedimiento"), "{list}");
+    assert!(!list.contains("Pendiente de revisar"));
+
+    // Un cambio de riesgo entre revisiones se marca con de-a.
+    f.st.db.watch_apply(org, &crate::db::WatchSnapshot { name: "Cykelbolaget AB".into(), form: "Aktiebolag".into(), level: "good".into(), year: None, revenue: None, result: None, solidity: None, flags: 3 });
+    f.post(&f.user_s, "/bevakning/refresh", &[("orgnr", org)]).await;
+    let list = f.get(&f.user_s, "/bevakning?lang=es").await.body;
+    assert!(list.contains("Riesgo: Riesgo bajo → Riesgo alto"), "el cambio de good a bad se muestra: {list}");
+    assert!(list.contains(r#"class="change new worse""#), "reciente y a peor");
+    let en = f.get(&f.user_s, "/bevakning?lang=en").await.body;
+    assert!(en.contains("Risk: Low risk → High risk"));
+
+    // Dejar de seguir.
+    let nocsrf = f.post_no_csrf(&f.user_s, "/bevakning/remove", &[("orgnr", org)]).await;
+    assert_eq!(nocsrf.status, StatusCode::FORBIDDEN);
+    let removed = f.post(&f.user_s, "/bevakning/remove", &[("orgnr", org), ("next", "/bevakning")]).await;
+    assert_eq!(removed.location().as_deref(), Some("/bevakning?ok=removed"));
+    assert!(!f.st.db.watch_has(f.user.id, org));
+    let events = f.events();
+    for e in ["watch_add", "watch_remove", "watch_refresh"] {
+        assert!(events.contains(&e.to_string()), "{e} registrado en la actividad");
+    }
+    unset_bolagsverket_env();
+}
+
+#[tokio::test]
+async fn following_is_capped_and_validates_the_number() {
+    let _env = lock_bolagsverket_env();
+    fake_bolagsverket().await;
+    let f = fx();
+    for i in 0..crate::db::WATCH_LIMIT {
+        f.st.db.watch_add(f.user.id, &format!("55600{i:05}"), "Relleno AB", "");
+    }
+    let r = f.post(&f.user_s, "/bevakning/add", &[("orgnr", "5569000028")]).await;
+    assert_eq!(r.location().as_deref(), Some("/bevakning?err=limit"));
+    assert!(!f.st.db.watch_has(f.user.id, "5569000028"));
+    assert!(f.get(&f.user_s, "/bevakning?err=limit&lang=es").await.body.contains("Puedes seguir hasta 50 empresas"));
+    // Un número que no es de organización no se guarda.
+    let bad = f.post(&f.sa_s, "/bevakning/add", &[("orgnr", "123")]).await;
+    assert_eq!(bad.status, StatusCode::NOT_FOUND);
+    assert_eq!(f.st.db.watch_count(f.sa.id), 0);
+    unset_bolagsverket_env();
+}
+
+#[tokio::test]
+async fn compare_shows_companies_side_by_side_and_explains_bad_input() {
+    let _env = lock_bolagsverket_env();
+    fake_bolagsverket().await;
+    let f = fx();
+    // Dos empresas válidas: columnas con sus nombres y números, y las filas de datos.
+    let r = f.get(&f.user_s, "/comparar?o=556703-7485&o=5560125790&o=&o=&lang=es").await;
+    assert_eq!(r.status, StatusCode::OK);
+    for needle in ["556703-7485", "556012-5790", "Cykelbolaget AB", "Forma jurídica", "Estado", "Riesgo", "Solidez", "Margen neto", "Último ejercicio", "Crecimiento de la facturación", "Mediana del sector", "El valor más alto de cada fila"] {
+        assert!(r.body.contains(needle), "falta {needle:?}");
+    }
+    assert!(r.body.contains("Riesgo alto"), "ambas están en konkurs");
+    // Con una sola empresa o con basura, un aviso claro y sin tabla.
+    let one = f.get(&f.user_s, "/comparar?o=556703-7485&lang=es").await.body;
+    assert!(one.contains("Indica al menos dos números de organización") && !one.contains("cmp-table"));
+    let junk = f.get(&f.user_s, "/comparar?o=abc&o=5560125790&lang=es").await.body;
+    assert!(junk.contains("No son números de organización válidos: abc") && !junk.contains("cmp-table"));
+    // Un número válido que el registro no conoce sale como columna que no se pudo cargar.
+    let miss = f.get(&f.user_s, "/comparar?o=5567037485&o=5560160680&lang=es").await.body;
+    assert!(miss.contains("No se pudo cargar 5560160680") && miss.contains("Cykelbolaget AB"));
+    // Duplicados: una sola columna → pide dos.
+    assert!(f.get(&f.user_s, "/comparar?o=5567037485&o=556703-7485&lang=es").await.body.contains("Indica al menos dos"));
+    // Idiomas.
+    let sv = f.get(&f.user_s, "/comparar?o=5567037485&o=5560125790&lang=sv").await.body;
+    assert!(sv.contains("Företagsform") && sv.contains("Omsättningstillväxt"));
+    unset_bolagsverket_env();
+}
+
+#[test]
+fn best_value_of_a_row_is_highlighted_only_with_two_or_more_values() {
+    use crate::views_tools::best_flags;
+    assert_eq!(best_flags(&[Some(1.0), Some(5.0), None, Some(5.0)]), [false, true, false, true], "los empates se marcan los dos");
+    assert_eq!(best_flags(&[Some(1.0), None]), [false, false], "con un solo dato no hay con qué comparar");
+    assert_eq!(best_flags(&[None, None]), [false, false]);
+    assert_eq!(best_flags(&[Some(-3.0), Some(-1.0)]), [false, true], "el menos negativo es el mejor");
+}
+
+#[tokio::test]
+async fn history_lists_what_each_person_viewed_and_searched() {
+    let mut f = fx();
+    let path = with_registry(&mut f, crate::registry::tests::SAMPLE);
+    let log = |user: &User, event: &str, detail: &str| {
+        f.st.db.log(&crate::db::NewActivity { user_id: Some(user.id), user_label: &user.label(), role: Some(user.role), event, method: "GET", path: "/", query: "", status: 200, ip: "", ua: "", detail });
+    };
+    log(&f.user, "company_view", "5560000019"); // el nombre sale del índice del registro
+    log(&f.user, "company_view", "5599999993"); // sin nombre conocido: se enseña el número
+    log(&f.user, "search", "volvo & co");
+    log(&f.admin, "search", "secreto de otra persona");
+    let r = f.get(&f.user_s, "/historial?lang=es").await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert!(r.body.contains("Nordlys Logistik AB") && r.body.contains(r#"href="/foretag/5560000019""#));
+    assert!(r.body.contains("559999-9993"), "sin nombre se enseña el número formateado");
+    assert!(r.body.contains(r#"href="/sok?q=volvo%20%26%20co""#) && r.body.contains("volvo &amp; co"), "la búsqueda se escapa y se puede repetir");
+    assert!(!r.body.contains("secreto de otra persona"), "cada persona ve solo su historial");
+    // Vacío para quien no ha hecho nada.
+    assert!(f.get(&f.sa_s, "/historial?lang=es").await.body.contains("Todavía no hay nada aquí"));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn new_screens_require_login_and_are_translated() {
+    let f = fx();
+    for path in ["/bevakning", "/comparar", "/historial"] {
+        let r = f.get_anon(path).await;
+        assert_eq!(r.status, StatusCode::SEE_OTHER, "{path}");
+        assert!(r.location().unwrap().starts_with("/login?next="));
+    }
+    for path in ["/bevakning/add", "/bevakning/remove", "/bevakning/refresh"] {
+        let r = send(&f.st, "POST", path, None, Some(form(&[("orgnr", "5299999994")])), &[]).await;
+        assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+    for lang in Lang::ALL {
+        for path in ["/bevakning", "/comparar", "/comparar?o=x&o=y", "/historial"] {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let r = f.get(&f.user_s, &format!("{path}{sep}lang={}", lang.code())).await;
+            assert_eq!(r.status, StatusCode::OK, "{path}");
+            assert!(!r.body.contains('⟦'), "{lang:?} {path}");
+        }
+    }
 }

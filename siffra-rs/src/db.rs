@@ -173,6 +173,44 @@ pub struct Kpis {
     pub total_users: i64,
 }
 
+/// Máximo de empresas que una persona puede seguir.
+pub const WATCH_LIMIT: i64 = 50;
+
+/// Una empresa seguida por una persona, con la última foto que se tomó de ella.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WatchRow {
+    pub orgnr: String,
+    pub name: String,
+    pub form: String,
+    pub added_at: String,
+    /// `None` = aún sin revisar; `Some("")` = sin valorar; `good` / `warn` / `bad`.
+    pub level: Option<String>,
+    pub year: Option<String>,
+    pub revenue: Option<i64>,
+    pub result: Option<i64>,
+    pub solidity: Option<f64>,
+    pub flags: i64,
+    pub checked_at: Option<String>,
+    /// `level` (de `change_from` a `change_to`, niveles) o `status` (marcas del registro).
+    pub change_kind: Option<String>,
+    pub change_from: Option<String>,
+    pub change_to: Option<String>,
+    pub changed_at: Option<String>,
+}
+
+/// Lo que se guarda de una revisión de la empresa. `level`: `""` (sin valorar), `good`, `warn` o `bad`.
+#[derive(Clone, Debug)]
+pub struct WatchSnapshot {
+    pub name: String,
+    pub form: String,
+    pub level: String,
+    pub year: Option<String>,
+    pub revenue: Option<i64>,
+    pub result: Option<i64>,
+    pub solidity: Option<f64>,
+    pub flags: i64,
+}
+
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
@@ -223,6 +261,26 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX IF NOT EXISTS activity_ts ON activity(ts);
 CREATE INDEX IF NOT EXISTS activity_user ON activity(user_id, ts);
 CREATE INDEX IF NOT EXISTS activity_event ON activity(event, ts);
+CREATE TABLE IF NOT EXISTS watchlist (
+    user_id     INTEGER NOT NULL,
+    orgnr       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    form        TEXT NOT NULL DEFAULT '',
+    added_at    TEXT NOT NULL,
+    level       TEXT,
+    year        TEXT,
+    revenue     INTEGER,
+    result      INTEGER,
+    solidity    REAL,
+    flags       INTEGER NOT NULL DEFAULT 0,
+    checked_at  TEXT,
+    change_kind TEXT,
+    change_from TEXT,
+    change_to   TEXT,
+    changed_at  TEXT,
+    PRIMARY KEY (user_id, orgnr)
+);
+CREATE INDEX IF NOT EXISTS watchlist_org ON watchlist(orgnr);
 ";
 
 const USER_COLS: &str = "id, email, username, name, role, active, lang, must_change, created_at, last_login, created_by";
@@ -462,6 +520,116 @@ impl Db {
         }
     }
 
+    // ───────────── Mis empresas ─────────────
+
+    pub fn watch_list(&self, user_id: i64) -> Vec<WatchRow> {
+        let conn = self.c();
+        conn.prepare(
+            "SELECT orgnr, name, form, added_at, level, year, revenue, result, solidity, flags, checked_at, change_kind, change_from, change_to, changed_at
+             FROM watchlist WHERE user_id = ?1 ORDER BY name COLLATE NOCASE",
+        )
+        .and_then(|mut s| {
+            s.query_map([user_id], |r| {
+                Ok(WatchRow {
+                    orgnr: r.get(0)?,
+                    name: r.get(1)?,
+                    form: r.get(2)?,
+                    added_at: r.get(3)?,
+                    level: r.get(4)?,
+                    year: r.get(5)?,
+                    revenue: r.get(6)?,
+                    result: r.get(7)?,
+                    solidity: r.get(8)?,
+                    flags: r.get(9)?,
+                    checked_at: r.get(10)?,
+                    change_kind: r.get(11)?,
+                    change_from: r.get(12)?,
+                    change_to: r.get(13)?,
+                    changed_at: r.get(14)?,
+                })
+            })
+            .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn watch_has(&self, user_id: i64, orgnr: &str) -> bool {
+        self.c().query_row("SELECT 1 FROM watchlist WHERE user_id=?1 AND orgnr=?2", params![user_id, orgnr], |_| Ok(())).optional().ok().flatten().is_some()
+    }
+
+    pub fn watch_count(&self, user_id: i64) -> i64 {
+        self.c().query_row("SELECT COUNT(*) FROM watchlist WHERE user_id=?1", [user_id], |r| r.get(0)).unwrap_or(0)
+    }
+
+    /// Empieza a seguir una empresa. `false` si ya la seguía.
+    pub fn watch_add(&self, user_id: i64, orgnr: &str, name: &str, form: &str) -> bool {
+        self.c()
+            .execute(
+                "INSERT OR IGNORE INTO watchlist (user_id, orgnr, name, form, added_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![user_id, orgnr, name, form, util::now_iso()],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
+
+    pub fn watch_remove(&self, user_id: i64, orgnr: &str) -> bool {
+        self.c().execute("DELETE FROM watchlist WHERE user_id=?1 AND orgnr=?2", params![user_id, orgnr]).map(|n| n > 0).unwrap_or(false)
+    }
+
+    /// Guarda una revisión de la empresa en la fila de TODAS las personas que la siguen y anota el cambio si el
+    /// nivel de riesgo o el estado del registro son distintos de la revisión anterior. Devuelve cuántas filas tocó.
+    pub fn watch_apply(&self, orgnr: &str, s: &WatchSnapshot) -> usize {
+        let mut conn = self.c();
+        let Ok(tx) = conn.transaction() else { return 0 };
+        let now = util::now_iso();
+        let rows: Vec<(i64, Option<String>, i64, Option<String>)> = tx
+            .prepare("SELECT user_id, level, flags, checked_at FROM watchlist WHERE orgnr = ?1")
+            .and_then(|mut st| st.query_map([orgnr], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default();
+        for (user_id, old_level, old_flags, checked) in &rows {
+            // Sin revisión anterior no hay con qué comparar: la primera foto no cuenta como cambio.
+            let change: Option<(&str, String, String)> = match (checked, old_level) {
+                (Some(_), Some(old)) if *old != s.level => Some(("level", old.clone(), s.level.clone())),
+                (Some(_), _) if *old_flags != s.flags => Some(("status", old_flags.to_string(), s.flags.to_string())),
+                _ => None,
+            };
+            let _ = tx.execute(
+                "UPDATE watchlist SET name=?3, form=?4, level=?5, year=?6, revenue=?7, result=?8, solidity=?9, flags=?10, checked_at=?11 WHERE user_id=?1 AND orgnr=?2",
+                params![user_id, orgnr, s.name, s.form, s.level, s.year, s.revenue, s.result, s.solidity, s.flags, now],
+            );
+            if let Some((kind, from, to)) = change {
+                let _ = tx.execute(
+                    "UPDATE watchlist SET change_kind=?3, change_from=?4, change_to=?5, changed_at=?6 WHERE user_id=?1 AND orgnr=?2",
+                    params![user_id, orgnr, kind, from, to, now],
+                );
+            }
+        }
+        let _ = tx.commit();
+        rows.len()
+    }
+
+    // ───────────── Historial ─────────────
+
+    /// Empresas que consultó una persona, la más reciente primero: (número de organización, última vez).
+    pub fn recent_companies(&self, user_id: i64, limit: i64) -> Vec<(String, String)> {
+        self.recent_details(user_id, "company_view", limit)
+    }
+
+    /// Búsquedas recientes de una persona (texto, última vez).
+    pub fn recent_searches(&self, user_id: i64, limit: i64) -> Vec<(String, String)> {
+        self.recent_details(user_id, "search", limit)
+    }
+
+    fn recent_details(&self, user_id: i64, event: &str, limit: i64) -> Vec<(String, String)> {
+        self.c()
+            .prepare(
+                "SELECT detail, MAX(ts) AS last FROM activity
+                 WHERE user_id = ?1 AND event = ?2 AND detail <> '' GROUP BY detail ORDER BY last DESC LIMIT ?3",
+            )
+            .and_then(|mut s| s.query_map(params![user_id, event, limit], |r| Ok((r.get(0)?, r.get(1)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default()
+    }
+
     // ───────────── actividad ─────────────
 
     pub fn log(&self, a: &NewActivity) {
@@ -651,6 +819,80 @@ mod tests {
         db.delete_user(id).unwrap();
         let (rows, _) = db.activity(&ActivityFilter::default(), 10, 0);
         assert_eq!(rows[0].user_label, "ana@x.co");
+    }
+
+    fn snap(level: &str, flags: i64) -> WatchSnapshot {
+        WatchSnapshot { name: "Prueba AB".into(), form: "AB-ORGFO".into(), level: level.into(), year: Some("2025".into()), revenue: Some(2_519), result: Some(176), solidity: Some(27.9), flags }
+    }
+
+    #[test]
+    fn watchlist_follow_unfollow_and_isolation_between_users() {
+        let db = Db::memory();
+        let (ana, luis) = (db.create_user(&new_user("ana@x.co", Role::User)).unwrap(), db.create_user(&new_user("luis@x.co", Role::User)).unwrap());
+        assert!(db.watch_add(ana, "5569705329", "Agartz AB", "AB-ORGFO"));
+        assert!(!db.watch_add(ana, "5569705329", "Agartz AB", "AB-ORGFO"), "seguirla dos veces no la duplica");
+        assert!(db.watch_has(ana, "5569705329") && !db.watch_has(luis, "5569705329"));
+        db.watch_add(ana, "5560125790", "AB Volvo", "AB-ORGFO");
+        let names: Vec<String> = db.watch_list(ana).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["AB Volvo", "Agartz AB"], "ordenadas por nombre, sin distinguir mayúsculas");
+        assert!(db.watch_list(luis).is_empty(), "cada persona ve solo las suyas");
+        assert_eq!(db.watch_count(ana), 2);
+        assert!(db.watch_remove(ana, "5560125790") && !db.watch_remove(ana, "5560125790"));
+        assert_eq!(db.watch_count(ana), 1);
+    }
+
+    #[test]
+    fn watchlist_detects_changes_between_reviews_but_not_the_first_one() {
+        let db = Db::memory();
+        let (ana, luis) = (db.create_user(&new_user("ana@x.co", Role::User)).unwrap(), db.create_user(&new_user("luis@x.co", Role::User)).unwrap());
+        db.watch_add(ana, "5569705329", "Agartz AB", "AB-ORGFO");
+        let fresh = &db.watch_list(ana)[0];
+        assert_eq!((fresh.level.clone(), fresh.checked_at.clone()), (None, None), "aún sin revisar");
+
+        assert_eq!(db.watch_apply("5569705329", &snap("good", 0)), 1);
+        let first = &db.watch_list(ana)[0];
+        assert_eq!((first.level.as_deref(), first.year.as_deref(), first.revenue), (Some("good"), Some("2025"), Some(2_519)));
+        assert_eq!(first.change_kind, None, "la primera foto no es un cambio");
+
+        // Mismo estado: nada nuevo. Luis empieza a seguirla después y no hereda cambios.
+        db.watch_apply("5569705329", &snap("good", 0));
+        assert_eq!(db.watch_list(ana)[0].change_kind, None);
+        db.watch_add(luis, "5569705329", "Agartz AB", "AB-ORGFO");
+
+        // El riesgo empeora: se anota para quien ya la seguía; todos los seguidores reciben la foto nueva.
+        assert_eq!(db.watch_apply("5569705329", &snap("bad", 0)), 2);
+        let changed = &db.watch_list(ana)[0];
+        assert_eq!((changed.change_kind.as_deref(), changed.change_from.as_deref(), changed.change_to.as_deref()), (Some("level"), Some("good"), Some("bad")));
+        assert!(changed.changed_at.is_some());
+        let late = &db.watch_list(luis)[0];
+        assert_eq!((late.level.as_deref(), late.change_kind.clone()), (Some("bad"), None), "quien la sigue desde después no ve un cambio anterior a su primera revisión");
+
+        // Cambio de estado del registro (p. ej. entra en concurso) con el mismo nivel de riesgo.
+        db.watch_apply("5569705329", &snap("bad", 1));
+        let status = &db.watch_list(ana)[0];
+        assert_eq!((status.change_kind.as_deref(), status.change_from.as_deref(), status.change_to.as_deref()), (Some("status"), Some("0"), Some("1")));
+        // "Sin valorar" es un nivel más: pasar de valorada a sin valorar también es un cambio.
+        db.watch_apply("5569705329", &snap("", 1));
+        assert_eq!(db.watch_list(ana)[0].change_to.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn deleting_a_user_keeps_the_table_consistent_and_history_lists_recent_things() {
+        let db = Db::memory();
+        let ana = db.create_user(&new_user("ana@x.co", Role::User)).unwrap();
+        let log = |event: &str, detail: &str| {
+            db.log(&NewActivity { user_id: Some(ana), user_label: "ana@x.co", role: Some(Role::User), event, method: "GET", path: "/", query: "", status: 200, ip: "", ua: "", detail });
+        };
+        log("company_view", "5569705329");
+        log("search", "volvo");
+        log("company_view", "5560125790");
+        log("company_view", "5569705329"); // repetida: sale una vez, con la fecha más reciente
+        log("search", "");
+        let companies: Vec<String> = db.recent_companies(ana, 10).into_iter().map(|(o, _)| o).collect();
+        assert_eq!(companies, ["5569705329", "5560125790"]);
+        assert_eq!(db.recent_searches(ana, 10).len(), 1, "las búsquedas vacías no cuentan");
+        assert_eq!(db.recent_companies(ana, 1).len(), 1);
+        assert!(db.recent_companies(ana + 99, 10).is_empty());
     }
 
     #[test]

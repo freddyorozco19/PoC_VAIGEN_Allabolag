@@ -56,13 +56,33 @@ resumen en lenguaje natural lo escriben plantillas del catálogo con las cifras 
 Todo es orientativo y no asesoramiento financiero.
 
 **Modo demo** (`SIFFRA_DEMO=1`, apagado por defecto y en producción): activa las 3 empresas ficticias y las pantallas
-de maqueta (vigilancia, liquidez, SIE, facturas). Sin él esas rutas dan 404, el menú solo lleva el buscador y la portada
+de maqueta (liquidez, SIE, facturas). Sin él esas rutas dan 404, el menú lleva solo pantallas reales y la portada
 invita a buscar (Volvo, Spotify, Ericsson, 556703-7485).
 
 **Medianas del sector (SCB):** consulta la tabla `TAB1270`. SCB retiró su versión en inglés (`lang=en` responde
 "Non-existent table"); la aplicación lo detecta y pide en sueco. El código SNI de Bolagsverket llega sin punto
 (`71121`) y se convierte a `71.121`, `71.12`, `71.1`, `71` hasta encontrar datos. Como no se conoce la plantilla, se usa la
 mediana de todos los tamaños.
+
+## Mis empresas, Comparar e Historial
+
+Tres pantallas con datos reales que completan el menú (en modo normal; las maquetas de liquidez, SIE y facturas siguen
+solo en `SIFFRA_DEMO=1` porque necesitarían la contabilidad propia de cada usuario):
+
+- **Mis empresas** (`/bevakning`): se sigue una empresa con el botón de su ficha (máx. 50 por persona). La lista guarda
+  la última "foto" de cada una (riesgo, estado del registro, facturación, resultado y solidez del último ejercicio) y
+  **marca los cambios** entre revisiones: del nivel de riesgo (p. ej. "Riesgo bajo → Riesgo alto") y del estado en el
+  registro (concurso, baja). El cambio se resalta 30 días. La foto se renueva cuando se abre la ficha (cualquier persona
+  que la abra actualiza la de todos los que la siguen) o con "Actualizar" / "Actualizar todas" (hasta 8 por pulsación,
+  las más antiguas primero; cada revisión consulta Bolagsverket y SCB). La primera foto no cuenta como cambio. No hay
+  avisos por correo: los cambios se ven en la pantalla.
+- **Comparar** (`/comparar?o=…&o=…`): de 2 a 4 números de organización lado a lado (forma, estado, riesgo, ejercicio,
+  facturación, resultado, patrimonio, solidez, margen, crecimiento y mediana del sector), con el mejor valor de cada
+  fila resaltado. Desde Mis empresas se marcan casillas y "Comparar seleccionadas".
+- **Historial** (`/historial`): las empresas consultadas y las búsquedas recientes de cada persona (salen de la
+  actividad ya registrada; el nombre se toma de Mis empresas o del índice del registro).
+
+Los datos viven en la tabla `watchlist` de la base SQLite de cuentas (se crea sola al arrancar).
 
 ## Cuentas, roles e idiomas
 

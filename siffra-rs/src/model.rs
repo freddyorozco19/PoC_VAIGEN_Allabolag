@@ -79,14 +79,6 @@ pub struct Company {
 /// Los cinco años calendario que cubren las series de `FinancialHistory`.
 pub const FINANCIAL_YEARS: [&str; 5] = ["2020", "2021", "2022", "2023", "2024"];
 
-pub struct WatchAlert {
-    pub severity: Severity,
-    pub company_name: &'static str,
-    /// Claves del catálogo.
-    pub text: &'static str,
-    pub when: &'static str,
-}
-
 pub struct CashWeek {
     pub week: u32,
     pub inflow: i64,
@@ -229,27 +221,6 @@ pub fn search_example_companies(query: &str) -> Vec<&'static Company> {
         })
         .collect()
 }
-
-pub static EXAMPLE_WATCH_ALERTS: [WatchAlert; 3] = [
-    WatchAlert {
-        severity: Severity::Bad,
-        company_name: "Fjällbruk Bygg & Design AB",
-        text: "watch.loss_registered",
-        when: "when.today",
-    },
-    WatchAlert {
-        severity: Severity::Warn,
-        company_name: "Kvarn & Krydda Livs AB",
-        text: "watch.address_registered",
-        when: "when.three_days",
-    },
-    WatchAlert {
-        severity: Severity::Good,
-        company_name: "Nordlys Logistik AB",
-        text: "watch.report_available",
-        when: "when.one_week",
-    },
-];
 
 /// Entradas y salidas de caja de EJEMPLO para las 13 semanas de la previsión de liquidez.
 pub static EXAMPLE_CASH_WEEKS: [CashWeek; 13] = [

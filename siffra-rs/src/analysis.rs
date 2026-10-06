@@ -173,6 +173,76 @@ fn sort(signals: &mut [Signal]) {
     signals.sort_by_key(|s| rank(s.severity())); // estable: conserva el orden de cálculo dentro de cada gravedad
 }
 
+/// Marcas de estado del registro que se guardan en la foto de una empresa.
+pub const FLAG_INSOLVENCY: i64 = 1;
+pub const FLAG_DEREGISTERED: i64 = 2;
+
+/// Resumen de una empresa en un momento dado: lo que se guarda en "Mis empresas" para detectar cambios y lo que
+/// se muestra al comparar. Todas las cifras en miles de coronas (tkr).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub level: Option<Severity>,
+    /// Año del último ejercicio con cifras.
+    pub year: Option<String>,
+    pub revenue: Option<i64>,
+    pub result: Option<i64>,
+    pub equity: Option<i64>,
+    pub solidity: Option<f64>,
+    pub margin: Option<f64>,
+    /// Variación de la facturación respecto al ejercicio anterior, en %.
+    pub growth: Option<f64>,
+    /// `FLAG_*` combinados.
+    pub flags: i64,
+}
+
+/// Foto de la empresa con las mismas reglas que la valoración de la ficha.
+pub fn snapshot(org: &Organisation, fin: Option<&Financials>, medians: Option<&SectorMedians>, today: &str) -> Snapshot {
+    let level = assess(org, fin, medians, today).level;
+    let latest = fin.and_then(|f| f.latest());
+    let previous = fin.and_then(|f| f.previous());
+    let growth = match (latest.and_then(|y| y.revenue), previous.and_then(|y| y.revenue)) {
+        (Some(now), Some(before)) if before > 0 => Some((now as f64 / before as f64 - 1.0) * 100.0),
+        _ => None,
+    };
+    let mut flags = 0;
+    if !org.forfaranden.is_empty() {
+        flags |= FLAG_INSOLVENCY;
+    }
+    if org.avregistreringsdatum.is_some() {
+        flags |= FLAG_DEREGISTERED;
+    }
+    Snapshot {
+        level,
+        year: latest.map(|y| y.label.clone()),
+        revenue: latest.and_then(|y| y.revenue),
+        result: latest.and_then(|y| y.result),
+        equity: latest.and_then(|y| y.equity),
+        solidity: latest.and_then(|y| y.solidity()),
+        margin: latest.and_then(|y| y.margin()),
+        growth,
+        flags,
+    }
+}
+
+/// Nivel como texto para guardarlo (`""` = sin valorar) y de vuelta.
+pub fn level_code(level: Option<Severity>) -> &'static str {
+    match level {
+        None => "",
+        Some(Severity::Good) => "good",
+        Some(Severity::Warn) => "warn",
+        Some(Severity::Bad) => "bad",
+    }
+}
+
+pub fn parse_level(code: &str) -> Option<Severity> {
+    match code {
+        "good" => Some(Severity::Good),
+        "warn" => Some(Severity::Warn),
+        "bad" => Some(Severity::Bad),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +283,33 @@ mod tests {
         Financials { years }
     }
 
+
+
+    #[test]
+    fn snapshot_condenses_the_assessment_for_lists_and_comparisons() {
+        let f = fin(vec![year("2023", 10_000, 900, 3_000, 8_000), year("2024", 11_000, 1_100, 3_900, 8_500)]);
+        let s = snapshot(&org(), Some(&f), None, "2025-06-01");
+        assert_eq!(s.level, Some(Severity::Good));
+        assert_eq!((s.year.as_deref(), s.revenue, s.result, s.equity), (Some("2024"), Some(11_000), Some(1_100), Some(3_900)));
+        assert!((s.growth.unwrap() - 10.0).abs() < 1e-9 && (s.margin.unwrap() - 10.0).abs() < 1e-9);
+        assert!((s.solidity.unwrap() - 45.88).abs() < 0.01);
+        assert_eq!(s.flags, 0);
+
+        let mut bad = org();
+        bad.forfaranden = vec!["Konkurs (sedan 2024-01-26)".into()];
+        bad.avregistreringsdatum = Some("2024-03-01".into());
+        let b = snapshot(&bad, None, None, "2025-06-01");
+        assert_eq!((b.level, b.year, b.revenue), (Some(Severity::Bad), None, None));
+        assert_eq!(b.flags, FLAG_INSOLVENCY | FLAG_DEREGISTERED);
+    }
+
+    #[test]
+    fn level_codes_round_trip() {
+        for l in [None, Some(Severity::Good), Some(Severity::Warn), Some(Severity::Bad)] {
+            assert_eq!(parse_level(level_code(l)), l);
+        }
+        assert_eq!(parse_level("raro"), None);
+    }
 
     #[test]
     fn below_the_sector_median_only_alerts_when_the_figure_is_weak_on_its_own() {

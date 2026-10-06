@@ -12,6 +12,7 @@ mod catalog;
 mod db;
 mod format;
 mod handlers;
+mod handlers_tools;
 mod i18n;
 mod model;
 mod registry;
@@ -20,6 +21,7 @@ mod summary;
 mod util;
 mod views;
 mod views_admin;
+mod views_tools;
 
 #[cfg(test)]
 mod tests;
@@ -60,6 +62,7 @@ async fn favicon() -> StatusCode {
 
 pub fn router(state: AppState) -> Router {
     use handlers as h;
+    use handlers_tools as t;
     Router::new()
         .route("/", get(h::root))
         .route("/healthz", get(h::healthz))
@@ -85,7 +88,13 @@ pub fn router(state: AppState) -> Router {
         .route("/foretag/:org", get(h::company))
         .route("/foretag/:org/benchmarks", get(h::company_benchmarks))
         .route("/foretag/:org/bokslut", get(h::company_bokslut))
-        .route("/bevakning", get(h::bevakning))
+        // Seguimiento, comparación e historial (datos reales)
+        .route("/bevakning", get(t::watch_get))
+        .route("/bevakning/add", post(t::watch_add_post))
+        .route("/bevakning/remove", post(t::watch_remove_post))
+        .route("/bevakning/refresh", post(t::watch_refresh_post))
+        .route("/comparar", get(t::compare_get))
+        .route("/historial", get(t::history_get))
         .route("/likviditet", get(h::likviditet))
         .route("/sie", get(h::sie))
         .route("/fakturor", get(h::fakturor))

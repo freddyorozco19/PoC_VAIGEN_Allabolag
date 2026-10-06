@@ -28,6 +28,29 @@ pub fn iso_from_unix(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+/// Inverso de `iso_from_unix` para "AAAA-MM-DDTHH:MM:SSZ" (también vale solo la fecha).
+pub fn unix_from_iso(iso: &str) -> Option<i64> {
+    let num = |range: std::ops::Range<usize>| -> Option<i64> { iso.get(range)?.parse().ok() };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let (h, mi, s) = if iso.len() >= 19 { (num(11..13)?, num(14..16)?, num(17..19)?) } else { (0, 0, 0) };
+    // Días desde 1970-01-01 (algoritmo de Howard Hinnant).
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + s)
+}
+
+/// Días enteros que han pasado desde `iso` hasta ahora (0 si es futuro o no se entiende la fecha).
+pub fn days_since(iso: &str) -> i64 {
+    unix_from_iso(iso).map(|t| ((now_unix() - t) / 86_400).max(0)).unwrap_or(0)
+}
+
 pub fn now_iso() -> String {
     iso_from_unix(now_unix())
 }
@@ -119,6 +142,18 @@ pub fn query_without(query: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_round_trip_and_days_since() {
+        for t in [0, 951_782_400, 1_790_003_725, -1, 1_234_567_890] {
+            assert_eq!(unix_from_iso(&iso_from_unix(t)), Some(t), "{t}");
+        }
+        assert_eq!(unix_from_iso("2000-02-29"), Some(951_782_400));
+        assert_eq!(unix_from_iso("basura"), None);
+        assert_eq!(unix_from_iso("2025-13-01"), None);
+        assert_eq!(days_since(&iso_from_unix(now_unix() - 3 * 86_400 - 5)), 3);
+        assert_eq!(days_since("no es una fecha"), 0);
+    }
 
     #[test]
     fn iso_dates() {

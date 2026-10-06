@@ -340,6 +340,11 @@ impl Registry {
         self.c().query_row("SELECT value FROM meta WHERE key='rows'", [], |r| r.get::<_, String>(0)).ok().and_then(|v| v.parse().ok()).unwrap_or(0)
     }
 
+    /// Nombre principal de una organización por su número (la fila activa primero).
+    pub fn name_of(&self, orgnr: &str) -> Option<String> {
+        self.c().query_row("SELECT name FROM company WHERE orgnr = ?1 ORDER BY dereg IS NOT NULL, seq LIMIT 1", [orgnr], |r| r.get(0)).ok()
+    }
+
     pub fn stats(&self) -> Stats {
         let conn = self.c();
         let one = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };

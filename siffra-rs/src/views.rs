@@ -108,6 +108,10 @@ pub fn icon_sized(name: &str, class: &str) -> Markup {
         "key" => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9"/><path d="m16 7 3 3"/>"#,
         "lock" => r#"<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>"#,
         "download" => r#"<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>"#,
+        "star" => r#"<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9Z"/>"#,
+        "columns" => r#"<rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/>"#,
+        "clock" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>"#,
+        "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>"#,
         "x" => r#"<path d="M6 6l12 12"/><path d="M18 6 6 18"/>"#,
         _ => "",
     };
@@ -143,9 +147,11 @@ struct NavItem {
     badge: Option<&'static str>,
 }
 
-const NAV_COMPANIES: [NavItem; 2] = [
+const NAV_COMPANIES: [NavItem; 4] = [
     NavItem { href: "/sok", label: "nav.search", short: "nav.search.short", icon: "search", badge: None },
-    NavItem { href: "/bevakning", label: "nav.watch", short: "nav.watch.short", icon: "bell", badge: Some("3") },
+    NavItem { href: "/bevakning", label: "nav.watch", short: "nav.watch.short", icon: "star", badge: None },
+    NavItem { href: "/comparar", label: "nav.compare", short: "nav.compare.short", icon: "columns", badge: None },
+    NavItem { href: "/historial", label: "nav.history", short: "nav.history.short", icon: "clock", badge: None },
 ];
 const NAV_BUSINESS: [NavItem; 3] = [
     NavItem { href: "/likviditet", label: "nav.liquidity", short: "nav.liquidity.short", icon: "trend", badge: None },
@@ -413,11 +419,11 @@ fn sidebar(c: &Ctx) -> Markup {
                     @if let Some(u) = &c.user { (user_menu(c, u)) }
                 }
             }
-            nav class={"side-nav" @if !c.demo { " single" }} aria-label=(c.t("ui.main_menu")) {
+            nav.side-nav aria-label=(c.t("ui.main_menu")) {
                 div.nav-group {
                     div.nav-heading { (c.t("nav.group.companies")) }
-                    // Vigilancia, liquidez, SIE y facturas son maquetas con datos de EJEMPLO: solo en modo demo.
-                    @for item in NAV_COMPANIES.iter().filter(|i| c.demo || i.href == "/sok") { (nav_link(c, item)) }
+                    // Liquidez, SIE y facturas son maquetas con datos de EJEMPLO: solo en modo demo.
+                    @for item in NAV_COMPANIES.iter() { (nav_link(c, item)) }
                 }
                 @if c.demo {
                     div.nav-group {
@@ -825,7 +831,7 @@ fn form_label(c: &Ctx, code: &str) -> String {
 }
 
 /// `5560125790` → `556012-5790`; cualquier otra forma (p. ej. una identidad de 12 dígitos) se deja tal cual.
-fn format_orgnr(orgnr: &str) -> String {
+pub fn format_orgnr(orgnr: &str) -> String {
     if orgnr.len() == 10 && orgnr.bytes().all(|b| b.is_ascii_digit()) { format!("{}-{}", &orgnr[..6], &orgnr[6..]) } else { orgnr.to_string() }
 }
 
@@ -1284,7 +1290,7 @@ pub enum FinState {
 
 /// Ficha con datos REALES de Bolagsverket (API gratuito). Los textos de la fuente (actividad, forma jurídica)
 /// están en sueco y se muestran tal cual.
-pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState) -> Markup {
+pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: bool) -> Markup {
     let address = [o.gatuadress.clone(), Some([o.postnummer.clone(), o.postort.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "))]
         .into_iter()
         .flatten()
@@ -1324,6 +1330,7 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState) -> Markup {
                         span.pill.pill-bad { span.pill-dot aria-hidden="true" {} (f) }
                     }
                 }
+                (crate::views_tools::follow_button(c, &o.organisationsnummer, following))
             }
 
             div.card {
@@ -1367,7 +1374,7 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState) -> Markup {
     )
 }
 
-fn risk_pill_opt(c: &Ctx, level: Option<Severity>) -> Markup {
+pub fn risk_pill_opt(c: &Ctx, level: Option<Severity>) -> Markup {
     match level {
         Some(l) => risk_pill(c, l),
         None => html! { span.pill.pill-user { span.pill-dot aria-hidden="true" {} (c.t("risk.unknown")) } },
@@ -1601,32 +1608,6 @@ pub fn live_error_page(c: &Ctx) -> Markup {
 }
 
 // ───────────────────────── Otras pantallas ─────────────────────────
-
-pub fn bevakning_page(c: &Ctx) -> Markup {
-    layout(
-        c,
-        c.t("nav.watch"),
-        html! {
-            div.page-head { h1.page-title { (c.t("nav.watch")) } }
-            div.card.narrow {
-                ul.alert-list {
-                    @for a in EXAMPLE_WATCH_ALERTS.iter() {
-                        (alert_row(c, a.severity, html! {
-                            @if let Some(co) = EXAMPLE_COMPANIES.iter().find(|co| co.name == a.company_name) {
-                                a.alert-link href=(format!("/foretag/{}", co.org_number)) { (a.company_name) }
-                            } @else {
-                                strong { (a.company_name) }
-                            }
-                            br;
-                            (c.t(a.text)) " " span.muted { "· " (c.t(a.when)) }
-                        }))
-                    }
-                }
-            }
-            p.note { (example_badge(c)) " " (c.t("watch.note")) }
-        },
-    )
-}
 
 pub fn likviditet_page(c: &Ctx) -> Markup {
     let unit = c.t("unit.tkr");

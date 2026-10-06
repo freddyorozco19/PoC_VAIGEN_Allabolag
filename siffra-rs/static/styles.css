@@ -1366,3 +1366,36 @@ kbd {
 /* Valoración financiera de una empresa real */
 .assess-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-bottom: var(--s3); font-size: 0.875rem; }
 .subtitle { margin: var(--s5) 0 var(--s2); font-size: 0.8125rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink2); }
+
+/* Mis empresas, Comparar, Historial */
+.follow-form { margin: 0; }
+.follow-btn.following { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.follow-btn.following .icon-sm { fill: currentColor; }
+.company-head .follow-form { flex-basis: 100%; }
+@media (min-width: 40rem) { .company-head .follow-form { flex-basis: auto; } }
+.check-cell { width: 2.75rem; text-align: center; }
+.check-cell input { position: relative; z-index: 1; width: 1.15rem; height: 1.15rem; cursor: pointer; }
+.row-actions form { margin: 0; }
+.row-actions button.icon-link { border: 0; background: none; cursor: pointer; }
+.change { font-size: 0.8125rem; color: var(--ink2); }
+.change.new { color: var(--ink); font-weight: 600; }
+.change.worse { color: var(--bad-ink); }
+.compare-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--s3); align-items: end; margin-bottom: var(--s4); max-width: 64rem; }
+.compare-form .btn { justify-self: start; }
+.compare-field .field-label { margin-bottom: var(--s1); }
+.cmp-table th, .cmp-table td { white-space: nowrap; }
+.cmp-table th[scope="row"] { position: sticky; left: 0; background: var(--sticky-bg); }
+.cmp-table td.best { font-weight: 700; background: var(--good-soft); color: var(--good-ink); }
+.cmp-table td.best.neg { color: var(--good-ink); }
+.company-head-link { font-weight: 600; text-transform: none; letter-spacing: normal; font-size: 0.95rem; color: var(--ink); }
+@media (hover: hover) { .company-head-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; } }
+.history-list li { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); padding: var(--s2) 0; border-bottom: 1px solid var(--line); }
+.history-list li:last-child { border-bottom: 0; }
+.history-link { display: grid; min-width: 0; }
+.history-link strong { overflow-wrap: anywhere; }
+@media (hover: hover) { .history-link:hover strong { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; } }
+.history-when { font-size: 0.8125rem; white-space: nowrap; }
+.watch-table th { white-space: normal; padding-inline: var(--s2); }
+.watch-table td { padding-inline: var(--s2); }
+.watch-table td.check-cell, .watch-table th.check-cell { padding-inline: var(--s2) 0; }
+.watch-table .org-sub { white-space: normal; }
