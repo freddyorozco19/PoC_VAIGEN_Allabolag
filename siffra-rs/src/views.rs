@@ -585,12 +585,14 @@ fn bar_chart(c: &Ctx, labels: &[&str], values: &[i64]) -> Markup {
     }
     let (labels, values) = (&labels[..n], &values[..n]);
     let (w, h) = (360.0_f64, 230.0_f64);
-    let (pl, pb, pt, pr) = (58.0_f64, 28.0_f64, 22.0_f64, 6.0_f64);
+    let (pl, pb, pt, pr) = (64.0_f64, 28.0_f64, 24.0_f64, 6.0_f64);
     let max = values.iter().copied().max().unwrap_or(0).max(0) as f64;
     let top = 4.0 * nice_step((max / 4.0).max(1.0));
     let in_mkr = top >= 5000.0;
     let (unit_tkr, unit_mkr) = (c.t("unit.tkr"), c.t("unit.mkr"));
-    let axis_label = |v: f64| if in_mkr { format!("{} {unit_mkr}", c.num(v / 1000.0)) } else { format!("{} {unit_tkr}", c.num(v)) };
+    // La unidad se escribe una vez sobre el eje y las marcas llevan solo la cifra: así caben en el margen izquierdo.
+    let axis_unit = if in_mkr { unit_mkr } else { unit_tkr };
+    let axis_label = |v: f64| if in_mkr { c.num(v / 1000.0) } else { c.num(v) };
     let bar_label = |v: i64| if in_mkr { mkr(c, v as f64) } else { c.int(v) };
     let bw = (w - pl - pr) / n as f64;
 
@@ -607,6 +609,7 @@ fn bar_chart(c: &Ctx, labels: &[&str], values: &[i64]) -> Markup {
         svg.chart viewBox=(format!("0 0 {} {}", w, h)) role="group" aria-labelledby="rc-title rc-desc" {
             title #rc-title { (title) }
             desc #rc-desc { (desc) }
+            text.axis-unit x="0" y="10" text-anchor="start" { (axis_unit) }
             @for (value, y) in grid_lines.iter() {
                 g {
                     line x1=(pl) x2=(w - pr) y1=(y) y2=(y) stroke="var(--line)" stroke-width="1" {}
@@ -1598,34 +1601,42 @@ fn financials_body(c: &Ctx, fin: &Financials) -> Markup {
                 dd { (latest.solidity().map(|s| c.pct1(s)).unwrap_or_else(|| "—".to_string())) }
             }
         }
-        @if has_revenue {
-            (bar_chart(c, &chart_labels, &chart_values))
-        } @else {
-            p.muted { (c.t("bok.no_revenue")) }
-        }
-        div.table-wrap.mt-3 {
-            table.fin-table {
-                caption.sr-only { (c.tf("fin.caption", &[unit])) }
-                thead {
-                    tr {
-                        th scope="col" { (unit) }
-                        @for y in fin.years.iter() { th.right scope="col" { (y.label) } }
-                    }
-                }
-                tbody {
-                    @for (label, values) in rows.iter() {
+        @let table = html! {
+            div.table-wrap {
+                table.fin-table {
+                    caption.sr-only { (c.tf("fin.caption", &[unit])) }
+                    thead {
                         tr {
-                            th scope="row" { (c.t(label)) }
-                            @for v in values.iter() {
-                                @match v {
-                                    Some(n) => { td.right.num.mono.neg[*n < 0] { (c.int(*n)) } }
-                                    None => { td.right.num.mono.muted { "—" } }
+                            th scope="col" { (unit) }
+                            @for y in fin.years.iter() { th.right scope="col" { (y.label) } }
+                        }
+                    }
+                    tbody {
+                        @for (label, values) in rows.iter() {
+                            tr {
+                                th scope="row" { (c.t(label)) }
+                                @for v in values.iter() {
+                                    @match v {
+                                        Some(n) => { td.right.num.mono.neg[*n < 0] { (c.int(*n)) } }
+                                        None => { td.right.num.mono.muted { "—" } }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        };
+        // Gráfico y tabla lado a lado en pantallas anchas: el SVG escala con su caja, así que se le da un ancho
+        // propio (ver `.fin-chart`) para que las etiquetas conserven su tamaño en vez de crecer con la tarjeta.
+        @if has_revenue {
+            div.fin-split.mt-3 {
+                div.fin-chart { (bar_chart(c, &chart_labels, &chart_values)) }
+                (table)
+            }
+        } @else {
+            p.muted { (c.t("bok.no_revenue")) }
+            div.mt-3 { (table) }
         }
         p.note { (c.tf(if fin.consolidated { "bok.source_esef" } else { "bok.source" }, &[latest.period_end.as_str()])) }
     }

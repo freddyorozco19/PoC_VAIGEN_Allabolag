@@ -1463,3 +1463,14 @@ tr.strong th, tr.strong td { font-weight: 700; }
 .data-example { max-width: 24rem; min-width: 9rem; overflow-wrap: break-word; font-size: 0.85rem; }
 .break-any { overflow-wrap: anywhere; word-break: break-word; }
 .stat-hint { margin: var(--s1) 0 0; font-size: 0.75rem; }
+
+/* Gráfico de facturación de la ficha: el SVG escala con su caja, así que en una tarjeta ancha el texto crecía hasta
+   ser desproporcionado. Se le fija un ancho de lectura (≈ 1,15× su lienzo) y, en pantallas anchas, la tabla va al lado. */
+.fin-chart { min-width: 0; max-width: 28rem; }
+.fin-chart .chart text { font-size: 13px; }
+.fin-split { display: grid; gap: var(--s4); align-items: start; }
+.fin-split > .table-wrap { min-width: 0; }
+@media (min-width: 90rem) {
+  .fin-split { grid-template-columns: minmax(20rem, 28rem) minmax(0, 1fr); gap: var(--s6); }
+}
+@media (max-width: 24rem) { .fin-chart .chart text { font-size: 14px; } }
