@@ -17,7 +17,7 @@ use crate::util;
 use crate::views::{self, Ctx};
 use crate::views_admin::{self, ActivityView, Notice, UserFormData};
 use crate::handlers_tools as tools;
-use crate::{bolagsverket, model, scb};
+use crate::{annual_report, bolagsverket, model, scb, views_fin};
 
 type Info = Extension<Arc<ReqInfo>>;
 
@@ -125,7 +125,7 @@ pub struct CompanyParams {
 }
 
 /// Empresa que no es de EJEMPLO: ficha real de Bolagsverket si hay credenciales; si no, 404.
-async fn live_company(st: &AppState, info: &ReqInfo, c: &Ctx, org: &str) -> Response {
+async fn live_company(st: &AppState, info: &ReqInfo, c: &Ctx, org: &str, tab: &str) -> Response {
     if !bolagsverket::configured() {
         return html_status(StatusCode::NOT_FOUND, views::company_not_found_page(c));
     }
@@ -141,7 +141,7 @@ async fn live_company(st: &AppState, info: &ReqInfo, c: &Ctx, org: &str) -> Resp
                 None => views::FinState::Pending,
             };
             let following = info.user.as_ref().is_some_and(|u| st.db.watch_has(u.id, &o.organisationsnummer));
-            html(views::live_profile_page(c, &o, &fin, following))
+            html(views::live_profile_page(c, &o, &fin, following, tab))
         }
         Err(bolagsverket::BvError::NotFound(_) | bolagsverket::BvError::Invalid(_)) => {
             html_status(StatusCode::NOT_FOUND, views::company_not_found_page(c))
@@ -174,13 +174,13 @@ pub async fn company(State(st): State<AppState>, Extension(info): Info, Path(org
             };
             html(views::company_page(&c, co, p.tab.as_deref().unwrap_or("ov"), &bench))
         }
-        None => live_company(&st, &info, &c, &org).await,
+        None => live_company(&st, &info, &c, &org, p.tab.as_deref().unwrap_or("ov")).await,
     }
 }
 
 /// Fragmento HTML con la valoración y las cifras de las cuentas anuales de una empresa real (lo pide la ficha en
 /// segundo plano).
-pub async fn company_bokslut(State(st): State<AppState>, Extension(info): Info, Path(org): Path<String>) -> Response {
+pub async fn company_bokslut(State(st): State<AppState>, Extension(info): Info, Path(org): Path<String>, Query(p): Query<CompanyParams>) -> Response {
     let c = info.ctx();
     if (info.demo && model::find_example_company(&org).is_some()) || !bolagsverket::configured() {
         return StatusCode::NOT_FOUND.into_response();
@@ -188,7 +188,13 @@ pub async fn company_bokslut(State(st): State<AppState>, Extension(info): Info, 
     match tools::load_analysis(&org, c.lang).await {
         Ok(a) => {
             tools::record_snapshot(&st, &a.org, a.fin.as_ref(), a.medians.as_ref());
-            html(views::financials_fragment(&c, &a.org, a.fin.as_ref(), a.medians.as_ref()))
+            // Los informes ya están guardados con todos sus hechos: las pestañas de personas y de datos salen de ahí.
+            match p.tab.as_deref() {
+                Some("fin") => html(views_fin::finance_tab(&c, &a.org, a.fin.as_ref(), a.medians.as_ref())),
+                Some("ppl") => html(views_fin::people_tab(&c, &a.org, &annual_report::stored_reports(&a.org.organisationsnummer))),
+                Some("dat") => html(views_fin::data_tab(&c, &a.org, &annual_report::stored_reports(&a.org.organisationsnummer))),
+                _ => html(views::financials_fragment(&c, &a.org, a.fin.as_ref(), a.medians.as_ref())),
+            }
         }
         Err(status) => status.into_response(),
     }

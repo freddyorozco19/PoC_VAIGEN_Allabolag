@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
+use crate::annual_report::RawFact;
 use crate::i18n::Lang;
 use crate::util;
 
@@ -173,6 +174,19 @@ pub struct Kpis {
     pub total_users: i64,
 }
 
+/// Un informe anual guardado.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportInfo {
+    pub doc_id: String,
+    pub orgnr: String,
+    pub period_end: String,
+    pub registered: String,
+    pub fetched_at: String,
+    pub fact_count: i64,
+    /// Ruta del documento original (ZIP) guardado en disco, si se guardó.
+    pub raw_path: Option<String>,
+}
+
 /// Máximo de empresas que una persona puede seguir.
 pub const WATCH_LIMIT: i64 = 50;
 
@@ -281,6 +295,30 @@ CREATE TABLE IF NOT EXISTS watchlist (
     PRIMARY KEY (user_id, orgnr)
 );
 CREATE INDEX IF NOT EXISTS watchlist_org ON watchlist(orgnr);
+CREATE TABLE IF NOT EXISTS report (
+    doc_id      TEXT PRIMARY KEY,
+    orgnr       TEXT NOT NULL,
+    period_end  TEXT NOT NULL,
+    registered  TEXT NOT NULL DEFAULT '',
+    fetched_at  TEXT NOT NULL,
+    fact_count  INTEGER NOT NULL,
+    raw_path    TEXT
+);
+CREATE INDEX IF NOT EXISTS report_org ON report(orgnr, period_end);
+CREATE TABLE IF NOT EXISTS fact (
+    doc_id  TEXT NOT NULL,
+    ctx     TEXT NOT NULL DEFAULT '',
+    concept TEXT NOT NULL,
+    value   REAL,
+    text    TEXT,
+    unit    TEXT,
+    scale   INTEGER NOT NULL DEFAULT 0,
+    instant TEXT,
+    start   TEXT,
+    end     TEXT,
+    dims    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS fact_doc ON fact(doc_id);
 ";
 
 const USER_COLS: &str = "id, email, username, name, role, active, lang, must_change, created_at, last_login, created_by";
@@ -518,6 +556,64 @@ impl Db {
             let cutoff = util::iso_from_unix(util::now_unix() - activity_retention_days * 86_400);
             let _ = conn.execute("DELETE FROM activity WHERE ts < ?1", [cutoff]);
         }
+    }
+
+    // ───────────── Informes anuales (todos los hechos) ─────────────
+
+    /// Guarda un informe y TODOS sus hechos (reemplaza lo anterior del mismo documento).
+    pub fn report_save(&self, orgnr: &str, doc_id: &str, period_end: &str, registered: &str, raw_path: Option<&str>, facts: &[RawFact]) {
+        let mut conn = self.c();
+        let Ok(tx) = conn.transaction() else { return };
+        let _ = tx.execute("DELETE FROM fact WHERE doc_id = ?1", [doc_id]);
+        let _ = tx.execute("DELETE FROM report WHERE doc_id = ?1", [doc_id]);
+        {
+            let Ok(mut st) = tx.prepare("INSERT INTO fact (doc_id, ctx, concept, value, text, unit, scale, instant, start, end, dims) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)") else { return };
+            for f in facts {
+                let _ = st.execute(params![doc_id, f.ctx, f.concept, f.value, f.text, f.unit, f.scale, f.instant, f.start, f.end, f.dims]);
+            }
+        }
+        let _ = tx.execute(
+            "INSERT INTO report (doc_id, orgnr, period_end, registered, fetched_at, fact_count, raw_path) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![doc_id, orgnr, period_end, registered, util::now_iso(), facts.len() as i64, raw_path],
+        );
+        let _ = tx.commit();
+    }
+
+    /// Hechos guardados de un informe, o `None` si ese documento no se ha guardado nunca.
+    pub fn report_facts(&self, doc_id: &str) -> Option<Vec<RawFact>> {
+        let conn = self.c();
+        conn.query_row("SELECT 1 FROM report WHERE doc_id = ?1", [doc_id], |_| Ok(())).optional().ok().flatten()?;
+        let mut st = conn.prepare("SELECT ctx, concept, value, text, unit, scale, instant, start, end, dims FROM fact WHERE doc_id = ?1 ORDER BY rowid").ok()?;
+        let rows = st
+            .query_map([doc_id], |r| {
+                Ok(RawFact {
+                    ctx: r.get(0)?,
+                    concept: r.get(1)?,
+                    value: r.get(2)?,
+                    text: r.get(3)?,
+                    unit: r.get(4)?,
+                    scale: r.get(5)?,
+                    instant: r.get(6)?,
+                    start: r.get(7)?,
+                    end: r.get(8)?,
+                    dims: r.get(9)?,
+                })
+            })
+            .ok()?;
+        Some(rows.flatten().collect())
+    }
+
+    /// Informes guardados de una empresa, el de ejercicio más reciente primero.
+    pub fn reports_of(&self, orgnr: &str) -> Vec<ReportInfo> {
+        self.c()
+            .prepare("SELECT doc_id, orgnr, period_end, registered, fetched_at, fact_count, raw_path FROM report WHERE orgnr = ?1 ORDER BY period_end DESC")
+            .and_then(|mut s| {
+                s.query_map([orgnr], |r| {
+                    Ok(ReportInfo { doc_id: r.get(0)?, orgnr: r.get(1)?, period_end: r.get(2)?, registered: r.get(3)?, fetched_at: r.get(4)?, fact_count: r.get(5)?, raw_path: r.get(6)? })
+                })
+                .map(|it| it.flatten().collect())
+            })
+            .unwrap_or_default()
     }
 
     // ───────────── Mis empresas ─────────────

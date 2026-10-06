@@ -15,6 +15,9 @@ module.exports = {
       // cada semana (SIFFRA_REGISTRY_REFRESH=1); la importación tarda ≈30 s y usa ≈100 MB extra de memoria.
       SIFFRA_REGISTRY: "/root/siffra/data/registry.db",
       SIFFRA_REGISTRY_REFRESH: "1",
+      // Informes anuales: el ZIP original de cada informe (iXBRL) se guarda aquí; sus datos, en la base de cuentas.
+      // Crecen con las empresas consultadas (≈50–200 KB por informe). Incluir la carpeta en las copias de seguridad.
+      SIFFRA_REPORTS: "/root/siffra/data/reports",
     },
     max_memory_restart: "700M",
     autorestart: true,

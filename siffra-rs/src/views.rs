@@ -1083,6 +1083,9 @@ fn kpi(label: &str, label_tip: &str, value: &str, negative: bool, detail: Markup
     }
 }
 
+/// Pestañas de la ficha de una empresa real.
+pub const LIVE_TABS: [(&str, &str); 4] = [("ov", "tab.overview"), ("fin", "tab.financials"), ("ppl", "tab.people"), ("dat", "tab.data")];
+
 const SUB_TABS: [(&str, &str); 4] = [("ov", "tab.overview"), ("fin", "tab.financials"), ("ppl", "tab.people"), ("ai", "tab.summary")];
 
 fn company_tabs(c: &Ctx, company: &Company, tab: &str, bench: &Bench) -> Markup {
@@ -1290,7 +1293,8 @@ pub enum FinState {
 
 /// Ficha con datos REALES de Bolagsverket (API gratuito). Los textos de la fuente (actividad, forma jurídica)
 /// están en sueco y se muestran tal cual.
-pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: bool) -> Markup {
+pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: bool, tab: &str) -> Markup {
+    let tab = LIVE_TABS.iter().find(|(id, _)| *id == tab).map(|(id, _)| *id).unwrap_or("ov");
     let address = [o.gatuadress.clone(), Some([o.postnummer.clone(), o.postort.clone()].into_iter().flatten().collect::<Vec<_>>().join(" "))]
         .into_iter()
         .flatten()
@@ -1333,6 +1337,13 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: b
                 (crate::views_tools::follow_button(c, &o.organisationsnummer, following))
             }
 
+            nav.tabs #vyer aria-label=(c.t("co.views")) {
+                @for (id, label) in LIVE_TABS.iter() {
+                    a.tab aria-current=[(*id == tab).then_some("page")] href=(format!("/foretag/{}?tab={}#vyer", o.organisationsnummer, id)) { (c.t(label)) }
+                }
+            }
+
+            @if tab == "ov" {
             div.card {
                 h2.card-title { (c.t("live.facts")) }
                 dl.facts {
@@ -1353,11 +1364,15 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: b
                     p.note { (c.t("live.swedish_note")) }
                 }
             }
-            @match fin {
-                FinState::Pending => {
-                    div #fin-body aria-busy="true" data-fragment=(format!("/foretag/{}/bokslut", o.organisationsnummer)) {
+            }
+            // Resumen: lo que ya esté en caché sale al instante. El resto de pestañas piden su contenido en segundo plano
+            // (con las cuentas ya guardadas es inmediato).
+            @match (tab, fin) {
+                (t, FinState::Ready(f, m)) if t == "ov" => { div #fin-body { (financials_fragment(c, o, f.as_ref(), m.as_ref())) } }
+                _ => {
+                    div #fin-body aria-busy="true" data-fragment=(if tab == "ov" { format!("/foretag/{}/bokslut", o.organisationsnummer) } else { format!("/foretag/{}/bokslut?tab={}", o.organisationsnummer, tab) }) {
                         div.card.mt-4 {
-                            h2.card-title { (c.t("as.title")) }
+                            h2.card-title { (c.t(if tab == "ov" { "as.title" } else { "live.financials" })) }
                             (sr(c.t("live.loading")))
                             @for _ in 0..4 {
                                 div.skeleton-row aria-hidden="true" { div.skeleton-line {} div.skeleton-bar {} }
@@ -1367,7 +1382,6 @@ pub fn live_profile_page(c: &Ctx, o: &Organisation, fin: &FinState, following: b
                     }
                     script { (PreEscaped(BENCH_SCRIPT)) }
                 }
-                FinState::Ready(f, m) => { div #fin-body { (financials_fragment(c, o, f.as_ref(), m.as_ref())) } }
             }
             p.note { (c.t("live.source")) }
         },
@@ -1393,6 +1407,10 @@ fn signal_text(c: &Ctx, s: &Signal) -> String {
         Signal::LossStreak(a, b) => c.tf("sig.loss_streak", &[&money(*a), &money(*b)]),
         Signal::Loss(r) => c.tf("sig.loss", &[&money(*r)]),
         Signal::LowSolidity(p) => c.tf("sig.low_solidity", &[&c.pct1(*p)]),
+        Signal::LowLiquidity(p) => c.tf("sig.low_liquidity", &[&c.pct1(*p)]),
+        Signal::CriticalLiquidity(p) => c.tf("sig.critical_liquidity", &[&c.pct1(*p)]),
+        Signal::CapitalLost(equity, capital) => c.tf("sig.capital_lost", &[&c.money(*equity), &c.money(*capital)]),
+        Signal::WeakInterestCover(x) => c.tf("sig.weak_interest", &[&c.dec(*x, 1)]),
         Signal::SolidityBelowMedian(v, m) => c.tf("sig.solidity_below", &[&c.pct1(*v), &c.pct1(*m)]),
         Signal::SolidityAboveMedian(v, m) => c.tf("sig.solidity_above", &[&c.pct1(*v), &c.pct1(*m)]),
         Signal::MarginBelowMedian(v, m) => c.tf("sig.margin_below", &[&c.pct1(*v), &c.pct1(*m)]),
@@ -1431,6 +1449,12 @@ fn live_summary(c: &Ctx, fin: Option<&Financials>, medians: Option<&SectorMedian
             None => c.tf("sum.live.solidity", &[&c.pct1(s)]),
         });
     }
+    if let Some(liq) = latest.liquidity() {
+        parts.push(match medians {
+            Some(m) => c.tf("sum.live.liquidity_vs", &[&c.pct1(liq), c.t(if liq >= m.liquidity { "bench.above" } else { "bench.below" }), &c.pct1(m.liquidity)]),
+            None => c.tf("sum.live.liquidity", &[&c.pct1(liq)]),
+        });
+    }
     if let Some(l) = level {
         parts.push(
             c.t(match l {
@@ -1459,6 +1483,7 @@ fn assessment_card(c: &Ctx, org: &Organisation, fin: Option<&Financials>, median
         (Some(y), Some(m)) => [
             y.margin().map(|v| ("term.margin", "tip.margin", BenchmarkPair { value: round1(v), median: round1(m.margin) }, 30.0)),
             y.solidity().map(|v| ("term.solidity", "tip.solidity.bench", BenchmarkPair { value: round1(v), median: round1(m.solidity) }, 80.0)),
+            y.liquidity().map(|v| ("term.liquidity", "tip.liquidity", BenchmarkPair { value: round1(v), median: round1(m.liquidity) }, 400.0)),
         ]
         .into_iter()
         .flatten()
@@ -1510,6 +1535,13 @@ pub fn financials_fragment(c: &Ctx, org: &Organisation, fin: Option<&Financials>
             } @else {
                 p.muted { (c.t("bok.none")) }
                 p.note { (c.t("bok.none_note")) }
+                p.note { (c.t("bok.none_why")) }
+                h3.card-subtitle { (c.t("bok.none_examples")) }
+                div.chips.chips-left {
+                    @for n in crate::views_fin::EXAMPLES_WITH_ACCOUNTS {
+                        @if n != org.organisationsnummer { a.chip href=(format!("/foretag/{n}")) { (format_orgnr(n)) } }
+                    }
+                }
             }
         }
     }

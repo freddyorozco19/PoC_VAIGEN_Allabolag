@@ -21,6 +21,7 @@ mod summary;
 mod util;
 mod views;
 mod views_admin;
+mod views_fin;
 mod views_tools;
 
 #[cfg(test)]
@@ -143,6 +144,7 @@ const USAGE: &str = "Uso:
   siffra-rs backup DESTINO                            Copia consistente de la base de datos
   siffra-rs registry-import ARCHIVO [--out registry.db] [--limit N]
                                                       Carga bolagsverket_bulkfil.zip (o su .txt) en un índice de nombres
+  siffra-rs report-dump ORGNR [--dims] [--text]       Muestra todo lo que trae el último informe anual de una empresa
   siffra-rs registry-stats [--db registry.db]         Cifras del índice (filas, activas, por tipo de identidad y forma)
   siffra-rs registry-search TEXTO [--db registry.db] [--all] [--limit N]
                                                       Busca por nombre (--all incluye las dadas de baja)";
@@ -152,7 +154,7 @@ fn registry_path(args: &[String], flag_name: &str) -> std::path::PathBuf {
 }
 
 /// Ejecuta un subcomando y devuelve `true` si lo era (entonces no se inicia el servidor).
-fn run_cli(args: &[String]) -> bool {
+async fn run_cli(args: &[String]) -> bool {
     let Some(cmd) = args.first().map(String::as_str) else { return false };
     let rest = &args[1..];
     match cmd {
@@ -244,6 +246,36 @@ fn run_cli(args: &[String]) -> bool {
             );
             true
         }
+        "report-dump" => {
+            // Diagnóstico: todo lo que trae el último informe anual de una empresa (hechos numéricos del total
+            // de la empresa; con --dims también los desgloses; con --text los textos).
+            let orgnr = rest.first().cloned().unwrap_or_else(|| fail(USAGE));
+            let Some(id) = bolagsverket::normalize_org_number(&orgnr) else { fail("Número de organización no válido.") };
+            let docs = bolagsverket::list_documents(&id).await.unwrap_or_else(|e| fail(&e.to_string()));
+            let mut docs = docs;
+            docs.sort_by(|a, b| b.period_end.cmp(&a.period_end));
+            let Some(doc) = docs.first() else { fail("La empresa no tiene informes anuales digitales.") };
+            println!("{} informes; el más reciente: ejercicio {} (id {})", docs.len(), doc.period_end, doc.id);
+            let zip = bolagsverket::download_document(&doc.id).await.unwrap_or_else(|e| fail(&e.to_string()));
+            let xhtml = annual_report::extract_xhtml(&zip).unwrap_or_else(|e| fail(&e));
+            let facts = annual_report::parse_all(&xhtml).unwrap_or_else(|e| fail(&e));
+            let numeric = facts.iter().filter(|f| f.value.is_some()).count();
+            let dimensional = facts.iter().filter(|f| !f.dims.is_empty()).count();
+            println!("{} hechos: {} con cifra, {} con desglose, {} de texto ({} KB descomprimido)", facts.len(), numeric, dimensional, facts.len() - numeric, xhtml.len() / 1024);
+            let want_dims = rest.iter().any(|a| a == "--dims");
+            let want_text = rest.iter().any(|a| a == "--text");
+            let mut shown: Vec<&annual_report::RawFact> = facts.iter().filter(|f| (f.value.is_some() && (want_dims || f.dims.is_empty())) || (want_text && f.value.is_none())).collect();
+            shown.sort_by(|a, b| a.concept.cmp(&b.concept).then(a.end.cmp(&b.end)).then(a.instant.cmp(&b.instant)).then(a.dims.cmp(&b.dims)));
+            for f in shown {
+                let period = f.instant.clone().unwrap_or_else(|| format!("{}..{}", f.start.clone().unwrap_or_default(), f.end.clone().unwrap_or_default()));
+                let value = match f.value {
+                    Some(v) => format!("{v} {}", f.unit.clone().unwrap_or_default()),
+                    None => f.text.clone().unwrap_or_default().chars().take(90).collect::<String>().replace('\n', " "),
+                };
+                println!("{:<62} {:<23} {}{}", f.concept, period, value, if f.dims.is_empty() { String::new() } else { format!("  [{}]", f.dims) });
+            }
+            true
+        }
         "registry-stats" => {
             let path = registry_path(rest, "--db");
             let s = registry::Registry::open(&path).unwrap_or_else(|e| fail(&e)).stats();
@@ -283,7 +315,7 @@ fn run_cli(args: &[String]) -> bool {
 async fn main() -> std::io::Result<()> {
     load_dotenv();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if run_cli(&args) {
+    if run_cli(&args).await {
         return Ok(());
     }
 
@@ -295,6 +327,8 @@ async fn main() -> std::io::Result<()> {
     if db.count_users() == 0 {
         println!("AVISO: no hay cuentas. Crea la primera con: siffra-rs user-add --role superadmin --name \"Nombre\" --username admin");
     }
+    // Todos los informes que se descarguen se guardan enteros (hechos en la base de datos, documento en disco).
+    annual_report::set_store(annual_report::Store { db: db.clone(), dir: std::env::var("SIFFRA_REPORTS").ok().filter(|d| !d.is_empty()).map(std::path::PathBuf::from) });
     let mut state = AppState::new(db.clone());
     state.demo = std::env::var("SIFFRA_DEMO").is_ok_and(|v| v == "1");
     state.force_secure = std::env::var("SIFFRA_SECURE_COOKIES").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));

@@ -101,3 +101,14 @@ No hay copia automática instalada todavía.
 - Disco: durante una renovación conviven el índice viejo, el zip (250 MB) y el nuevo `.part` (≈600 MB): reservar ≈1,5 GB libres.
 - **No reiniciar pm2 mientras se renueva** (los ≈4 minutos de descarga): se aborta y empieza de nuevo en el siguiente arranque.
 - Ver estado: `siffra-rs registry-stats --db /root/siffra/data/registry.db`.
+
+## Informes anuales guardados
+
+- Cada informe que se lee de Bolagsverket se guarda entero: el ZIP original en `SIFFRA_REPORTS`
+  (`/root/siffra/data/reports/<orgnr>/<documento>.zip`) y todas sus cifras y textos en las tablas `report` y `fact` de la
+  base de cuentas. Las fichas, la valoración y las pestañas Finanzas/Personas/Datos se leen de lo guardado, sin volver a
+  descargar (el límite de Bolagsverket es de 60 consultas por minuto).
+- Crear la carpeta antes de reiniciar: `mkdir -p /root/siffra/data/reports && chmod 700 /root/siffra/data/reports`.
+- Crecimiento: ≈50–200 KB por informe en disco y ≈100–250 filas por informe en la base. Entrar en la copia de seguridad
+  (`siffra-rs backup` copia solo la base; copiar también la carpeta `reports`).
+- Ver un informe guardado: `siffra-rs report-dump <orgnr>`.

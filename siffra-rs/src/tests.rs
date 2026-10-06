@@ -1399,7 +1399,7 @@ fn assessment_numbers_are_rounded_and_the_summary_reads_well() {
     org.forfaranden.clear();
     org.avregistreringsdatum = None;
     org.aktiv = true;
-    let year = |label: &str, revenue, result, equity, assets| FinancialYear { period_end: format!("{label}-12-31"), label: label.into(), revenue: Some(revenue), result: Some(result), equity: Some(equity), assets: Some(assets) };
+    let year = |label: &str, revenue, result, equity, assets| FinancialYear { period_end: format!("{label}-12-31"), label: label.into(), revenue: Some(revenue), result: Some(result), equity: Some(equity), assets: Some(assets), ..Default::default() };
     let fin = Financials { years: vec![year("2024", 2_615, 190, 580, 2_100), year("2025", 2_519, 176, 600, 2_150)] };
     let med = SectorMedians { margin: 18.2, solidity: 68.0, liquidity: 294.0, year: "2024".into(), sni_code: "71.121".into(), sni_label: "Tekniska konsultbyråer".into(), size_class: "TOT".into(), exact_sni: true, exact_size: false };
 
@@ -1620,4 +1620,145 @@ async fn new_screens_require_login_and_are_translated() {
             assert!(!r.body.contains('⟦'), "{lang:?} {path}");
         }
     }
+}
+
+// ───────────────────────── Análisis financiero avanzado: pestañas de la ficha ─────────────────────────
+
+/// Bolagsverket simulado con UN informe anual completo (el de `rich_report`) para `ORG`. Cuenta las descargas.
+async fn fake_bolagsverket_with_report(downloads: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use axum::{Form, Json};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    async fn token(Form(_): Form<HashMap<String, String>>) -> Response {
+        Json(json!({ "access_token": "tok-123", "expires_in": 3600 })).into_response()
+    }
+    async fn orgs(Json(_): Json<Value>) -> Response {
+        Json(serde_json::from_str::<Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap()).into_response()
+    }
+    async fn docs(Json(_): Json<Value>) -> Response {
+        Json(json!({ "dokument": [{"dokumentId": "doc-rich_paket", "filformat": "application/zip", "rapporteringsperiodTom": "2025-12-31", "registreringstidpunkt": "2026-03-01"}] })).into_response()
+    }
+    async fn document(State(n): State<std::sync::Arc<std::sync::atomic::AtomicUsize>>, _h: HeaderMap) -> Response {
+        n.fetch_add(1, Ordering::SeqCst);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            w.start_file("informe.xhtml", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            w.write_all(annual_report::rich_tests::rich_report().as_bytes()).unwrap();
+            w.finish().unwrap();
+        }
+        ([(header::CONTENT_TYPE, "application/zip")], buf.into_inner()).into_response()
+    }
+    let app = Router::new()
+        .route("/oauth2/token", post(token))
+        .route("/vardefulla-datamangder/v1/organisationer", post(orgs))
+        .route("/vardefulla-datamangder/v1/dokumentlista", post(docs))
+        .route("/vardefulla-datamangder/v1/dokument/:id", get(document))
+        .with_state(downloads);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::env::set_var("BOLAGSVERKET_CLIENT_ID", "test-id");
+    std::env::set_var("BOLAGSVERKET_CLIENT_SECRET", "test-secret");
+    std::env::set_var("BOLAGSVERKET_BASE_URL", format!("http://{addr}/vardefulla-datamangder/v1"));
+}
+
+#[tokio::test]
+async fn company_tabs_show_charts_ratios_people_and_all_stored_data() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let _env = lock_bolagsverket_env();
+    let downloads = Arc::new(AtomicUsize::new(0));
+    fake_bolagsverket_with_report(downloads.clone()).await;
+    let f = fx();
+    let dir = std::env::temp_dir().join(format!("siffra-tabs-{}", crate::util::random_hex(4)));
+    annual_report::set_store(annual_report::Store { db: f.st.db.clone(), dir: Some(dir.clone()) });
+    let org = "5569000036";
+
+    // Finanzas: gráficos SVG con su tabla, ratios con las cifras del informe y las dos tablas contables.
+    let fin = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=fin&lang=es")).await;
+    assert_eq!(fin.status, StatusCode::OK);
+    assert!(!fin.body.contains("<html"), "es un fragmento");
+    assert!(fin.body.matches("<svg").count() >= 4, "facturación, márgenes, solidez, liquidez y estructura");
+    for needle in [
+        "Facturación y resultados", "Márgenes", "Cómo se financia la empresa", "Gastos de explotación 2025",
+        "Ratios financieros", "Margen operativo", "8,0\u{a0}%", "Rentabilidad sobre patrimonio (ROE)", "Cobertura de intereses", "6,8×",
+        "Cuenta de resultados", "Gastos de personal", "Resultado de explotación", "Balance", "Capital social", "Deuda a corto plazo",
+        "Capital circulante", "350", "Facturación por empleado", "200",
+    ] {
+        assert!(fin.body.contains(needle), "la pestaña Finanzas no contiene {needle:?}");
+    }
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "el informe se descarga una vez");
+
+    // Personas: los firmantes con su cargo, la actividad y la plantilla; textos del informe tal cual.
+    let ppl = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=ppl&lang=es")).await.body;
+    for needle in ["Firmantes del informe anual", "Anna Test", "Verkställande direktör", "Bo Prov", "Styrelseordförande", "Actividad (según el informe)", "Bolaget bedriver konsultverksamhet."] {
+        assert!(ppl.contains(needle), "la pestaña Personas no contiene {needle:?}");
+    }
+
+    // Datos: el informe leído, con todas sus cifras (también la que tiene desglose) y sus textos.
+    let dat = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab=dat&lang=es")).await.body;
+    for needle in ["Informes leídos", "doc-rich_paket", "Ver las 37 cifras del informe", "Ver los 7 textos del informe", "Nettoomsattning", "KassaBank", "SegmentAxel=se-gen-base:ProductoMember", "UnderskriftHandlingRoll"] {
+        assert!(dat.contains(needle), "la pestaña Datos no contiene {needle:?}");
+    }
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "personas y datos salen de lo guardado, sin volver a descargar");
+
+    // El documento original queda en disco, y la ficha tiene las cuatro pestañas.
+    let saved = std::fs::read_dir(dir.join(org)).unwrap().count();
+    assert_eq!(saved, 1);
+    let page = f.get(&f.user_s, &format!("/foretag/{org}?tab=fin&lang=es")).await.body;
+    for tab in ["Visión general", "Finanzas", "Personas", "Datos del informe"] {
+        assert!(page.contains(tab), "falta la pestaña {tab}");
+    }
+    assert!(page.contains(&format!(r#"data-fragment="/foretag/{org}/bokslut?tab=fin""#)));
+    assert!(page.contains(r#"aria-current="page""#));
+
+    // Idiomas: ninguna clave sin traducir en ninguna pestaña.
+    for lang in Lang::ALL {
+        for tab in ["fin", "ppl", "dat"] {
+            let r = f.get(&f.user_s, &format!("/foretag/{org}/bokslut?tab={tab}&lang={}", lang.code())).await;
+            assert!(!r.body.contains('⟦'), "{lang:?} {tab}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    unset_bolagsverket_env();
+}
+
+#[tokio::test]
+async fn the_summary_assessment_uses_liquidity_and_capital_from_the_full_report() {
+    let _env = lock_bolagsverket_env();
+    let downloads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fake_bolagsverket_with_report(downloads).await;
+    let f = fx();
+    annual_report::set_store(annual_report::Store { db: f.st.db.clone(), dir: None });
+    let r = f.get(&f.user_s, "/foretag/5569000044/bokslut?lang=es").await.body;
+    assert!(r.contains("La liquidez es del 200,0\u{a0}%"), "el resumen cita la liquidez: {r}");
+    assert!(r.contains("Comparación con el sector") || r.contains("Valoración financiera"));
+    unset_bolagsverket_env();
+}
+
+#[test]
+fn companies_without_digital_accounts_get_an_explanation_and_examples() {
+    let mut org = bolagsverket::map_organisation(&serde_json::from_str::<serde_json::Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap(), "5299999994").unwrap();
+    org.organisationsnummer = "5593006280".into();
+    for lang in Lang::ALL {
+        let c = Ctx::new(lang);
+        for html in [
+            crate::views_fin::finance_tab(&c, &org, None, None).into_string(),
+            crate::views_fin::data_tab(&c, &org, &[]).into_string(),
+            crate::views_fin::people_tab(&c, &org, &[]).into_string(),
+            views::financials_fragment(&c, &org, None, None).into_string(),
+        ] {
+            assert!(!html.contains('⟦'), "{lang:?}: clave sin traducir");
+            assert!(html.contains("/foretag/5569705329"), "{lang:?}: enlaza a una empresa con datos");
+            assert!(!html.contains("class=\"chip\" href=\"/foretag/5593006280\""), "no se ofrece a sí misma como ejemplo");
+        }
+    }
+    let es = crate::views_fin::finance_tab(&Ctx::new(Lang::Es), &org, None, None).into_string();
+    assert!(es.contains("iXBRL") && es.contains("556970-5329"));
 }

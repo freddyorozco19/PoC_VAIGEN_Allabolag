@@ -20,6 +20,11 @@ const LOW_SOLIDITY: f64 = 10.0;
 /// holding y los vehículos con poca deuda). Los gráficos siguen mostrando la comparación sin veredicto.
 const WEAK_SOLIDITY: f64 = 20.0;
 const WEAK_MARGIN: f64 = 2.0;
+/// Kassalikviditet: por debajo de 100 % hay que vigilar; por debajo de 50 % es crítico.
+const LOW_LIQUIDITY: f64 = 100.0;
+const CRITICAL_LIQUIDITY: f64 = 50.0;
+/// Veces que el resultado antes de gastos financieros cubre los intereses.
+const WEAK_INTEREST_COVER: f64 = 1.5;
 /// Diferencia (en puntos) con la mediana del sector para hablar de "por encima" o "por debajo".
 const SOLIDITY_BAND: f64 = 5.0;
 const MARGIN_BAND: f64 = 2.0;
@@ -40,6 +45,14 @@ pub enum Signal {
     LossStreak(i64, i64),
     Loss(i64),
     LowSolidity(f64),
+    /// Liquidez (kassalikviditet) por debajo del 100 %: no cubre sus deudas a corto plazo sin vender existencias.
+    LowLiquidity(f64),
+    /// Liquidez por debajo del 50 %.
+    CriticalLiquidity(f64),
+    /// Patrimonio neto, capital social: el primero cayó por debajo de la mitad del segundo (kontrollbalansräkning).
+    CapitalLost(i64, i64),
+    /// Cobertura de intereses por debajo de 1,5 veces.
+    WeakInterestCover(f64),
     /// (valor de la empresa, mediana del sector)
     SolidityBelowMedian(f64, f64),
     SolidityAboveMedian(f64, f64),
@@ -55,11 +68,13 @@ pub enum Signal {
 impl Signal {
     pub fn severity(&self) -> Severity {
         match self {
-            Signal::Insolvency(_) | Signal::NegativeEquity(_) | Signal::LossStreak(..) | Signal::LowSolidity(_) => Severity::Bad,
+            Signal::Insolvency(_) | Signal::NegativeEquity(_) | Signal::LossStreak(..) | Signal::LowSolidity(_) | Signal::CriticalLiquidity(_) | Signal::CapitalLost(..) => Severity::Bad,
             Signal::Deregistered(_)
             | Signal::NoFilings
             | Signal::StaleReport(_)
             | Signal::Loss(_)
+            | Signal::LowLiquidity(_)
+            | Signal::WeakInterestCover(_)
             | Signal::SolidityBelowMedian(..)
             | Signal::MarginBelowMedian(..)
             | Signal::RevenueDrop(..) => Severity::Warn,
@@ -132,6 +147,22 @@ pub fn assess(org: &Organisation, fin: Option<&Financials>, medians: Option<&Sec
     let solidity = latest.solidity();
     if let Some(s) = solidity.filter(|s| *s >= 0.0 && *s < LOW_SOLIDITY) {
         signals.push(Signal::LowSolidity(s));
+    }
+    // Capital social perdido: con patrimonio negativo ya salta NegativeEquity, que es más preciso.
+    if let (Some(equity), Some(capital)) = (latest.equity, latest.share_capital) {
+        if equity >= 0 && capital > 0 && equity * 2 < capital {
+            signals.push(Signal::CapitalLost(equity, capital));
+        }
+    }
+    if let Some(l) = latest.liquidity() {
+        if l < CRITICAL_LIQUIDITY {
+            signals.push(Signal::CriticalLiquidity(l));
+        } else if l < LOW_LIQUIDITY {
+            signals.push(Signal::LowLiquidity(l));
+        }
+    }
+    if let Some(cover) = latest.interest_cover().filter(|c| *c < WEAK_INTEREST_COVER) {
+        signals.push(Signal::WeakInterestCover(cover));
     }
     if let (Some(s), Some(m)) = (solidity, medians) {
         if s < m.solidity - SOLIDITY_BAND && s < WEAK_SOLIDITY {
@@ -272,6 +303,7 @@ mod tests {
             result: Some(result),
             equity: Some(equity),
             assets: Some(assets),
+            ..Default::default()
         }
     }
 
@@ -386,7 +418,7 @@ mod tests {
     fn without_digital_accounts_the_company_is_not_rated() {
         let a = assess(&org(), None, None, "2025-06-01");
         assert_eq!((a.level, a.signals.clone()), (None, vec![Signal::NoFilings]));
-        let empty = fin(vec![FinancialYear { period_end: "2024-12-31".into(), label: "2024".into(), revenue: None, result: None, equity: None, assets: None }]);
+        let empty = fin(vec![FinancialYear { period_end: "2024-12-31".into(), label: "2024".into(), ..Default::default() }]);
         assert_eq!(assess(&org(), Some(&empty), None, "2025-06-01").level, None);
     }
 
@@ -411,6 +443,39 @@ mod tests {
         let a = assess(&org(), Some(&f), Some(&medians(5.0, 30.0)), "2025-06-01");
         assert!(a.signals.is_empty(), "31 % vs 30 % y 5,05 % vs 5 % no dicen nada: {:?}", a.signals);
         assert_eq!(a.level, Some(Severity::Good));
+    }
+
+    #[test]
+    fn detailed_report_data_feeds_liquidity_capital_and_interest_signals() {
+        let base = |extra: FinancialYear| FinancialYear { period_end: "2024-12-31".into(), label: "2024".into(), revenue: Some(5_000), result: Some(200), equity: Some(2_000), assets: Some(4_000), ..extra };
+        // Liquidez 80 % → vigilar; 40 % → crítica.
+        let low = fin(vec![base(FinancialYear { current_assets: Some(200), short_term_debt: Some(250), ..Default::default() })]);
+        let a = assess(&org(), Some(&low), None, "2025-06-01");
+        assert!(a.signals.iter().any(|s| matches!(s, Signal::LowLiquidity(v) if (*v - 80.0).abs() < 1e-9)));
+        assert_eq!(a.level, Some(Severity::Warn));
+        let critical = fin(vec![base(FinancialYear { current_assets: Some(300), inventory: Some(200), short_term_debt: Some(250), ..Default::default() })]);
+        let b = assess(&org(), Some(&critical), None, "2025-06-01");
+        assert!(b.signals.iter().any(|s| matches!(s, Signal::CriticalLiquidity(v) if (*v - 40.0).abs() < 1e-9)), "las existencias no cuentan: (300 − 200) / 250");
+        assert_eq!(b.level, Some(Severity::Bad));
+        // Una liquidez sana no dice nada.
+        let fine = fin(vec![base(FinancialYear { current_assets: Some(900), short_term_debt: Some(250), ..Default::default() })]);
+        assert!(assess(&org(), Some(&fine), None, "2025-06-01").signals.iter().all(|s| !matches!(s, Signal::LowLiquidity(_) | Signal::CriticalLiquidity(_))));
+
+        // Capital social perdido: patrimonio 40 con capital social 100 → kontrollbalansräkning.
+        let lost = fin(vec![FinancialYear { equity: Some(40), share_capital: Some(100), ..base(Default::default()) }]);
+        let c = assess(&org(), Some(&lost), None, "2025-06-01");
+        assert!(c.signals.contains(&Signal::CapitalLost(40, 100)) && c.level == Some(Severity::Bad));
+        // 60 de 100 no llega a la mitad perdida; y con patrimonio negativo manda NegativeEquity.
+        let ok = fin(vec![FinancialYear { equity: Some(60), share_capital: Some(100), assets: Some(400), ..base(Default::default()) }]);
+        assert!(!assess(&org(), Some(&ok), None, "2025-06-01").signals.iter().any(|s| matches!(s, Signal::CapitalLost(..))));
+        let neg = fin(vec![FinancialYear { equity: Some(-5), share_capital: Some(100), ..base(Default::default()) }]);
+        assert!(!assess(&org(), Some(&neg), None, "2025-06-01").signals.iter().any(|s| matches!(s, Signal::CapitalLost(..))));
+
+        // Cobertura de intereses: (60 + 50) / 50 = 2,2 veces es suficiente; (10 + 50) / 50 = 1,2 es débil.
+        let enough = fin(vec![base(FinancialYear { result_before_tax: Some(60), interest_expense: Some(50), ..Default::default() })]);
+        assert!(!assess(&org(), Some(&enough), None, "2025-06-01").signals.iter().any(|s| matches!(s, Signal::WeakInterestCover(_))));
+        let weak = fin(vec![base(FinancialYear { result_before_tax: Some(10), interest_expense: Some(50), ..Default::default() })]);
+        assert!(assess(&org(), Some(&weak), None, "2025-06-01").signals.iter().any(|s| matches!(s, Signal::WeakInterestCover(v) if (*v - 1.2).abs() < 1e-9)));
     }
 
     #[test]

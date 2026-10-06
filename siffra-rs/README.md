@@ -84,6 +84,25 @@ solo en `SIFFRA_DEMO=1` porque necesitarían la contabilidad propia de cada usua
 
 Los datos viven en la tabla `watchlist` de la base SQLite de cuentas (se crea sola al arrancar).
 
+## Ficha de empresa: análisis financiero e informes completos
+
+La ficha tiene cuatro pestañas (`?tab=`): **Visión general**, **Finanzas** (`fin`), **Personas** (`ppl`) y **Datos del
+informe** (`dat`). Se cargan como fragmentos de `/foretag/<orgnr>/bokslut`.
+
+- **Nada se tira del informe.** `annual_report.rs` lee todos los hechos iXBRL de cada informe (cifras con su escala y
+  signo, desgloses por ejes/contextos y textos) y los guarda en `report` + `fact`, más el ZIP original en disco
+  (`SIFFRA_REPORTS`). Sin esa variable los datos se guardan igual en la base, pero no el ZIP.
+- **Finanzas:** gráficos SVG propios (facturación y resultados, márgenes con la mediana del sector, solidez, liquidez,
+  estructura de financiación, gastos de explotación), cada uno con "Ver como tabla"; ratios por ejercicio (márgenes, ROE,
+  ROA, rotación, solidez, liquidez, razón corriente, caja, endeudamiento, cobertura de intereses, gastos de personal,
+  capital circulante, facturación por empleado), cuenta de resultados y balance. Si falta una cifra el ratio queda sin
+  dato, no se inventa.
+- **Personas:** firmantes del informe con su cargo, plantilla media y los textos del informe (actividad, decisión de la
+  junta, principios contables) tal como los presenta la empresa. No es el registro completo de cargos.
+- **Datos del informe:** informes leídos (cierre, registro, nº de datos, documento) y todas las cifras y textos de cada
+  uno. La valoración usa también liquidez, capital perdido y cobertura de intereses cuando el informe los trae.
+- `siffra-rs report-dump <orgnr>` muestra lo guardado de una empresa.
+
 ## Cuentas, roles e idiomas
 
 La aplicación exige iniciar sesión (nginx ya no pide clave). Las cuentas, las sesiones y el registro de actividad viven en
