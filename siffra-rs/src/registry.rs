@@ -279,7 +279,7 @@ pub struct Hit {
     pub id_type: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Stats {
     pub rows: i64,
     pub distinct_orgnr: i64,

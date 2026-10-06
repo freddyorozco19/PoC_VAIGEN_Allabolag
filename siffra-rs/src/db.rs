@@ -174,6 +174,44 @@ pub struct Kpis {
     pub total_users: i64,
 }
 
+/// Cifras globales del dataset de informes guardados (pantalla "Datos").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DataStats {
+    pub reports: i64,
+    pub esef_reports: i64,
+    pub companies: i64,
+    pub facts: i64,
+    pub numeric_facts: i64,
+    pub dimensional_facts: i64,
+    pub concepts: i64,
+    pub raw_files: i64,
+    pub oldest_period: String,
+    pub newest_period: String,
+    pub last_fetch: String,
+    /// (prefijo de la taxonomía, hechos, conceptos distintos)
+    pub by_taxonomy: Vec<(String, i64, i64)>,
+    pub by_unit: Vec<(String, i64)>,
+    /// (eje de desglose, hechos)
+    pub axes: Vec<(String, i64)>,
+    /// (año de cierre, informes de Bolagsverket, informes ESEF)
+    pub by_year: Vec<(String, i64, i64)>,
+}
+
+/// Un concepto del dataset (p. ej. `se-gen-base:Nettoomsattning`) con su frecuencia y un ejemplo.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConceptRow {
+    pub concept: String,
+    pub facts: i64,
+    pub reports: i64,
+    pub companies: i64,
+    pub numeric: i64,
+    pub with_dims: i64,
+    pub example_value: Option<f64>,
+    pub example_text: Option<String>,
+    pub example_unit: Option<String>,
+    pub example_period: String,
+}
+
 /// Un informe anual guardado.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReportInfo {
@@ -319,6 +357,7 @@ CREATE TABLE IF NOT EXISTS fact (
     dims    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS fact_doc ON fact(doc_id);
+CREATE INDEX IF NOT EXISTS fact_concept ON fact(concept);
 ";
 
 const USER_COLS: &str = "id, email, username, name, role, active, lang, must_change, created_at, last_login, created_by";
@@ -614,6 +653,108 @@ impl Db {
                 .map(|it| it.flatten().collect())
             })
             .unwrap_or_default()
+    }
+
+    // ───────────── Catálogo del dataset (pantalla "Datos") ─────────────
+
+    /// Cifras globales de los informes guardados: cuántos hay, de qué fuente, y cómo se reparten sus hechos.
+    pub fn data_stats(&self) -> DataStats {
+        let conn = self.c();
+        let one = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+        let text = |sql: &str| -> String { conn.query_row(sql, [], |r| r.get::<_, Option<String>>(0)).ok().flatten().unwrap_or_default() };
+        let pairs = |sql: &str| -> Vec<(String, i64)> {
+            conn.prepare(sql).and_then(|mut s| s.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?))).map(|it| it.flatten().collect())).unwrap_or_default()
+        };
+        let by_taxonomy = conn
+            .prepare(
+                "SELECT CASE WHEN instr(concept, ':') > 0 THEN substr(concept, 1, instr(concept, ':') - 1) ELSE '' END AS p, COUNT(*), COUNT(DISTINCT concept)
+                 FROM fact GROUP BY p ORDER BY 2 DESC",
+            )
+            .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default();
+        let by_year = conn
+            .prepare(
+                "SELECT substr(period_end, 1, 4) AS y, SUM(doc_id NOT LIKE 'esef-%'), SUM(doc_id LIKE 'esef-%') FROM report GROUP BY y ORDER BY y DESC",
+            )
+            .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map(|it| it.flatten().collect()))
+            .unwrap_or_default();
+        // Ejes de desglose: cada hecho con desglose trae `Eje=Miembro;Eje=Miembro`; se cuentan por eje.
+        let mut axes: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        if let Ok(mut s) = conn.prepare("SELECT dims, COUNT(*) FROM fact WHERE dims != '' GROUP BY dims LIMIT 50000") {
+            if let Ok(rows) = s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+                for (dims, n) in rows.flatten() {
+                    for part in dims.split(';') {
+                        let axis = part.split('=').next().unwrap_or("");
+                        if !axis.is_empty() {
+                            *axes.entry(axis.to_string()).or_insert(0) += n;
+                        }
+                    }
+                }
+            }
+        }
+        let mut axes: Vec<(String, i64)> = axes.into_iter().collect();
+        axes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        DataStats {
+            reports: one("SELECT COUNT(*) FROM report"),
+            esef_reports: one("SELECT COUNT(*) FROM report WHERE doc_id LIKE 'esef-%'"),
+            companies: one("SELECT COUNT(DISTINCT orgnr) FROM report"),
+            facts: one("SELECT COUNT(*) FROM fact"),
+            numeric_facts: one("SELECT COUNT(*) FROM fact WHERE value IS NOT NULL"),
+            dimensional_facts: one("SELECT COUNT(*) FROM fact WHERE dims != ''"),
+            concepts: one("SELECT COUNT(DISTINCT concept) FROM fact"),
+            raw_files: one("SELECT COUNT(*) FROM report WHERE raw_path IS NOT NULL"),
+            oldest_period: text("SELECT MIN(period_end) FROM report"),
+            newest_period: text("SELECT MAX(period_end) FROM report"),
+            last_fetch: text("SELECT MAX(fetched_at) FROM report"),
+            by_taxonomy,
+            by_unit: pairs("SELECT unit, COUNT(*) FROM fact WHERE unit IS NOT NULL GROUP BY unit ORDER BY 2 DESC LIMIT 20"),
+            axes: axes.into_iter().take(30).collect(),
+            by_year,
+        }
+    }
+
+    /// Conceptos distintos del dataset con cuántas veces aparecen y un ejemplo. `q`: texto dentro del nombre;
+    /// `taxonomy`: prefijo exacto (`se-gen-base`, `ifrs-full`…). Devuelve la página y el total que cumple el filtro.
+    pub fn concept_catalog(&self, q: &str, taxonomy: &str, limit: i64, offset: i64) -> (Vec<ConceptRow>, i64) {
+        let conn = self.c();
+        let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+        let prefix = if taxonomy.is_empty() { String::new() } else { format!("{taxonomy}:") };
+        let filter = "WHERE f.concept LIKE ?1 ESCAPE '\\' AND (?2 = '' OR substr(f.concept, 1, length(?2)) = ?2)";
+        let total = conn
+            .query_row(&format!("SELECT COUNT(DISTINCT f.concept) FROM fact f {filter}"), params![like, prefix], |r| r.get(0))
+            .unwrap_or(0);
+        let sql = format!(
+            "SELECT f.concept, COUNT(*), COUNT(DISTINCT f.doc_id), COUNT(DISTINCT r.orgnr), SUM(f.value IS NOT NULL), SUM(f.dims != '')
+             FROM fact f JOIN report r ON r.doc_id = f.doc_id {filter}
+             GROUP BY f.concept ORDER BY 2 DESC, 1 LIMIT ?3 OFFSET ?4"
+        );
+        let mut rows: Vec<ConceptRow> = conn
+            .prepare(&sql)
+            .and_then(|mut s| {
+                s.query_map(params![like, prefix, limit, offset], |r| {
+                    Ok(ConceptRow { concept: r.get(0)?, facts: r.get(1)?, reports: r.get(2)?, companies: r.get(3)?, numeric: r.get(4)?, with_dims: r.get(5)?, ..Default::default() })
+                })
+                .map(|it| it.flatten().collect())
+            })
+            .unwrap_or_default();
+        for row in &mut rows {
+            // Un ejemplo (mejor del total de la empresa, sin desglose) para ver qué forma tiene el dato.
+            let example = conn
+                .query_row(
+                    "SELECT value, text, unit, COALESCE(instant, end) FROM fact
+                     WHERE concept = ?1 AND (value IS NOT NULL OR text IS NOT NULL) ORDER BY (dims = '') DESC, rowid DESC LIMIT 1",
+                    [&row.concept],
+                    |r| Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?)),
+                )
+                .ok();
+            if let Some((value, text, unit, period)) = example {
+                row.example_value = value;
+                row.example_text = text.map(|t| t.chars().take(80).collect());
+                row.example_unit = unit;
+                row.example_period = period.unwrap_or_default();
+            }
+        }
+        (rows, total)
     }
 
     // ───────────── Mis empresas ─────────────

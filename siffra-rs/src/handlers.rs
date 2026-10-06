@@ -41,7 +41,7 @@ fn redirect_with_cookies(to: &str, cookies: &[String]) -> Response {
     resp
 }
 
-fn forbidden(c: &Ctx) -> Response {
+pub(crate) fn forbidden(c: &Ctx) -> Response {
     html_status(StatusCode::FORBIDDEN, views::message_page(c, c.t("err.forbidden_title"), c.t("err.forbidden")))
 }
 
@@ -790,7 +790,7 @@ pub async fn activity_get(State(st): State<AppState>, Extension(info): Info, Que
 }
 
 /// Neutraliza fórmulas (=, +, -, @) al abrir el CSV en una hoja de cálculo y escapa las comillas.
-fn csv_cell(s: &str) -> String {
+pub(crate) fn csv_cell(s: &str) -> String {
     let safe = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
     format!("\"{}\"", safe.replace('"', "\"\""))
 }

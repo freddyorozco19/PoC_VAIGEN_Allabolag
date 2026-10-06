@@ -116,6 +116,18 @@ momento de escribir esto, con retraso respecto a la presentación). Lo que ya se
   servidores simulados y sin ellas no salen a la red). `siffra-rs esef-check <orgnr>` muestra lo que se encontraría.
 - No cubre empresas no cotizadas sin informe digital (p. ej. Spotify AB, filial de una sociedad luxemburguesa).
 
+## Pantalla Datos (`/datos`)
+
+Solo administradores y superadmin (grupo «Administración» del menú). Muestra la estructura de todas las fuentes y el
+dataset guardado: tarjetas de cifras (informes de Bolagsverket y ESEF, empresas, hechos, conceptos, filas del índice de
+nombres), una ficha por fuente (Bolagsverket organización y cuentas, archivo masivo, SCB, GLEIF, XBRL International)
+con dirección, límites, cada campo (tipo, significado, para qué se usa) y un ejemplo de la forma de los datos, las tablas
+internas `report`/`fact`, el reparto de lo guardado (por taxonomía, año, unidad y eje de desglose) y un **explorador de
+conceptos**: cada concepto distinto con cuántas veces aparece, un ejemplo y el campo de Siffra al que alimenta (o «—» si
+solo se guarda). Filtra por texto y taxonomía (`?q=`, `?tax=ifrs-full`) y se exporta en `/datos.csv`. Las descripciones
+de las fuentes son estáticas (`src/views_data.rs`): si cambia lo que se lee de una API, hay que actualizarlas. Las cifras
+del índice de nombres se recalculan como mucho cada 10 minutos.
+
 ## Cuentas, roles e idiomas
 
 La aplicación exige iniciar sesión (nginx ya no pide clave). Las cuentas, las sesiones y el registro de actividad viven en

@@ -13,6 +13,7 @@ mod db;
 mod esef;
 mod format;
 mod handlers;
+mod handlers_data;
 mod handlers_tools;
 mod i18n;
 mod model;
@@ -22,6 +23,7 @@ mod summary;
 mod util;
 mod views;
 mod views_admin;
+mod views_data;
 mod views_fin;
 mod views_tools;
 
@@ -64,6 +66,7 @@ async fn favicon() -> StatusCode {
 
 pub fn router(state: AppState) -> Router {
     use handlers as h;
+    use handlers_data as d;
     use handlers_tools as t;
     Router::new()
         .route("/", get(h::root))
@@ -85,6 +88,8 @@ pub fn router(state: AppState) -> Router {
         // Actividad (solo superadmin)
         .route("/activity", get(h::activity_get))
         .route("/activity.csv", get(h::activity_csv))
+        .route("/datos", get(d::datos_get))
+        .route("/datos.csv", get(d::datos_csv))
         // Aplicación
         .route("/sok", get(h::sok))
         .route("/foretag/:org", get(h::company))

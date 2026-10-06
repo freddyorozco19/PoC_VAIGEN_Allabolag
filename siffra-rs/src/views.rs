@@ -113,6 +113,7 @@ pub fn icon_sized(name: &str, class: &str) -> Markup {
         "clock" => r#"<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>"#,
         "refresh" => r#"<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>"#,
         "x" => r#"<path d="M6 6l12 12"/><path d="M18 6 6 18"/>"#,
+        "database" => r#"<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>"#,
         _ => "",
     };
     html! {
@@ -160,6 +161,7 @@ const NAV_BUSINESS: [NavItem; 3] = [
 ];
 const NAV_USERS: NavItem = NavItem { href: "/users", label: "nav.users", short: "nav.users", icon: "users", badge: None };
 const NAV_ACTIVITY: NavItem = NavItem { href: "/activity", label: "nav.activity", short: "nav.activity", icon: "activity", badge: None };
+const NAV_DATA: NavItem = NavItem { href: "/datos", label: "nav.data", short: "nav.data", icon: "database", badge: None };
 
 const FONTS_URL: &str = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap";
 const FAVICON: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b6e75'/%3E%3Cpath d='M21 11.5c-1-1.6-2.8-2.5-5-2.5-2.9 0-4.8 1.5-4.8 3.6 0 5 10 2.7 10 7.6 0 2.3-2.2 3.8-5.2 3.8-2.4 0-4.4-1-5.4-2.7' fill='none' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E";
@@ -435,6 +437,7 @@ fn sidebar(c: &Ctx) -> Markup {
                     div.nav-group.nav-admin {
                         div.nav-heading { (c.t("nav.group.admin")) }
                         (nav_link(c, &NAV_USERS))
+                        (nav_link(c, &NAV_DATA))
                         @if super_ { (nav_link(c, &NAV_ACTIVITY)) }
                     }
                 }

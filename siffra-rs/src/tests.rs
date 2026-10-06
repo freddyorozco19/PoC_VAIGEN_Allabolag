@@ -819,6 +819,7 @@ fn every_key_used_in_the_code_exists_in_the_catalog() {
     let sources = [
         ("views.rs", include_str!("views.rs")),
         ("views_admin.rs", include_str!("views_admin.rs")),
+        ("views_data.rs", include_str!("views_data.rs")),
         ("handlers.rs", include_str!("handlers.rs")),
         ("auth.rs", include_str!("auth.rs")),
         ("app.rs", include_str!("app.rs")),
@@ -1935,4 +1936,69 @@ async fn esef_can_be_switched_off_and_never_runs_without_servers_in_tests() {
     assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1, "solo la descarga de la comprobación sin guion");
     unset_bolagsverket_env();
     unset_esef_env();
+}
+
+// ───────────────────────── Pantalla Datos (estructura y dataset) ─────────────────────────
+
+#[tokio::test]
+async fn data_screen_shows_sources_stored_dataset_and_concepts_to_admins_only() {
+    let f = fx();
+    // Un informe real de Bolagsverket (sintético) y uno ESEF guardados en la misma base.
+    let facts = annual_report::parse_all(&annual_report::rich_tests::rich_report()).unwrap();
+    f.st.db.report_save("5569000036", "doc-datos-1", "2025-12-31", "2026-03-01", None, &facts);
+    let esef_fact = |concept: &str, value: f64| annual_report::RawFact {
+        concept: concept.into(), ctx: "f1".into(), value: Some(value), text: None, unit: Some("SEK".into()), scale: 0,
+        instant: Some("2024-12-31".into()), start: None, end: None, dims: String::new(),
+    };
+    f.st.db.report_save("5560427220", "esef-549300XXXXXXXXXXXX00-2024-12-31", "2024-12-31", "2025-05-08", None, &[esef_fact("ifrs-full:Assets", 5.0e11)]);
+
+    // Solo administradores: una persona con rol "user" recibe 403 (página y CSV) y sin sesión se redirige al login.
+    assert_eq!(f.get(&f.user_s, "/datos?lang=es").await.status, StatusCode::FORBIDDEN);
+    assert_eq!(f.get(&f.user_s, "/datos.csv").await.status, StatusCode::FORBIDDEN);
+    assert_ne!(f.get_anon("/datos").await.status, StatusCode::OK);
+
+    for sess in [&f.admin_s, &f.sa_s] {
+        let r = f.get(sess, "/datos?lang=es").await;
+        assert_eq!(r.status, StatusCode::OK);
+        for needle in [
+            "Estructura de los datos", "Fuentes de datos", "Bolagsverket · Organización", "Bolagsverket · Cuentas anuales", "Bolagsverket · Archivo masivo",
+            "SCB · Medianas del sector", "GLEIF · Registro de LEI", "XBRL International · Informes ESEF", "Tablas internas del dataset",
+            "organisationsidentitet.identitetsbeteckning", "dokument[].dokumentId", "ix:nonFraction", "TAB1270", "attributes.registration.status",
+            "Explorador de conceptos", "se-gen-base:Nettoomsattning", "ifrs-full:Assets", "revenue", "assets",
+            "1 de Bolagsverket · 1 ESEF", "Informes guardados",
+        ] {
+            assert!(r.body.contains(needle), "la pantalla Datos no contiene {needle:?}");
+        }
+        // El menú lleva a la pantalla.
+        assert!(r.body.contains(r#"href="/datos""#));
+    }
+
+    // Filtros: por taxonomía y por texto.
+    let ifrs = f.get(&f.admin_s, "/datos?tax=ifrs-full&lang=es").await.body;
+    assert!(ifrs.contains("break-any\">ifrs-full:Assets") && !ifrs.contains("break-any\">se-gen-base:Nettoomsattning"));
+    let q = f.get(&f.admin_s, "/datos?q=nettoomsattning&lang=es").await.body;
+    assert!(q.contains("break-any\">se-gen-base:Nettoomsattning") && !q.contains("break-any\">ifrs-full:Assets"));
+    // Entradas raras no rompen nada (comodines SQL, comillas, prefijo con símbolos).
+    let odd = f.get(&f.admin_s, "/datos?q=%25_%27&tax=ifrs%27--&page=-4&lang=es").await;
+    assert_eq!(odd.status, StatusCode::OK);
+
+    // CSV: cabecera, conceptos y el campo de Siffra al que alimenta cada uno.
+    let csv = f.get(&f.admin_s, "/datos.csv").await;
+    assert_eq!(csv.status, StatusCode::OK);
+    assert!(csv.body.contains("concept,taxonomy,facts") && csv.body.contains("ifrs-full:Assets") && csv.body.contains("\"revenue\""));
+
+    // Idiomas: nada sin traducir.
+    for lang in Lang::ALL {
+        let r = f.get(&f.admin_s, &format!("/datos?lang={}", lang.code())).await;
+        assert!(!r.body.contains('⟦'), "{lang:?}");
+    }
+}
+
+#[test]
+fn concepts_know_which_summary_field_they_feed() {
+    assert_eq!(annual_report::mapped_members("se-gen-base:Nettoomsattning"), vec!["revenue"]);
+    assert_eq!(annual_report::mapped_members("ifrs-full:ProfitLossBeforeTax"), vec!["result_before_tax", "result"]);
+    assert_eq!(annual_report::mapped_members("ifrs-full:RevenueFromContractsWithCustomers"), vec!["revenue"]);
+    assert!(annual_report::mapped_members("se-gen-base:AllmantVerksamheten").is_empty(), "se guarda pero no alimenta cifras");
+    assert!(annual_report::mapped_members("ifrs-full:Nettoomsattning").is_empty(), "el nombre sueco no vale como IFRS");
 }

@@ -537,6 +537,57 @@ fn ifrs_fields(local: &str) -> &'static [Field] {
     }
 }
 
+impl Field {
+    /// Nombre del campo de `FinancialYear` al que alimenta.
+    fn member(self) -> &'static str {
+        match self {
+            Field::Revenue => "revenue",
+            Field::OperatingIncome => "operating_income",
+            Field::OperatingCosts => "operating_costs",
+            Field::PersonnelCost => "personnel_cost",
+            Field::OtherExternal => "other_external",
+            Field::Materials | Field::GoodsForResale => "goods_cost",
+            Field::Depreciation => "depreciation",
+            Field::OperatingResult => "operating_result",
+            Field::FinancialNet => "financial_net",
+            Field::InterestExpense => "interest_expense",
+            Field::ResultAfterFinancial => "result",
+            Field::ResultBeforeTax => "result_before_tax",
+            Field::Tax => "tax",
+            Field::NetResult => "net_result",
+            Field::FixedAssets => "fixed_assets",
+            Field::CurrentAssets => "current_assets",
+            Field::Inventory => "inventory",
+            Field::TradeReceivables => "trade_receivables",
+            Field::ShortReceivables => "short_receivables",
+            Field::Cash => "cash",
+            Field::Assets => "assets",
+            Field::Equity => "equity",
+            Field::ShareCapital => "share_capital",
+            Field::RestrictedEquity => "restricted_equity",
+            Field::FreeEquity => "free_equity",
+            Field::UntaxedReserves => "untaxed_reserves",
+            Field::LongTermDebt => "long_term_debt",
+            Field::ShortTermDebt => "short_term_debt",
+            Field::TradePayables => "trade_payables",
+            Field::Employees => "employees",
+            Field::ReportedSolidity => "reported_solidity",
+        }
+    }
+}
+
+/// Campos de `FinancialYear` que alimenta un concepto con su prefijo (`se-gen-base:Nettoomsattning` →
+/// `["revenue"]`); vacío si el concepto no se usa en el resumen (se guarda igualmente).
+pub fn mapped_members(concept: &str) -> Vec<&'static str> {
+    let local = concept.rsplit(':').next().unwrap_or(concept);
+    if concept.starts_with("ifrs-full:") {
+        ifrs_fields(local).iter().map(|f| f.member()).collect()
+    } else {
+        // Igual que `merge_raw`: fuera de IFRS se reconoce por el nombre local (taxonomía sueca).
+        field_for(local).into_iter().map(|f| f.member()).collect()
+    }
+}
+
 /// `reports`: los hechos de cada informe, del MÁS RECIENTE al más antiguo.
 /// Para cada (campo, fin de periodo) gana el hecho más preciso (menor `scale`) y, a igualdad, el del informe más reciente.
 /// Solo cuentan los hechos del total de la empresa (sin desglose) de un instante o de un ejercicio de ~12 meses.

@@ -1437,3 +1437,29 @@ tr.strong th, tr.strong td { font-weight: 700; }
 .data-table td { vertical-align: top; }
 .data-table td.mono { font-size: 0.8125rem; overflow-wrap: anywhere; }
 .card-subtitle { margin-top: var(--s4); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink2); }
+
+/* ───────────── Pantalla Datos ───────────── */
+.data-source { padding: 0; }
+.data-source > summary {
+  display: flex; align-items: baseline; justify-content: space-between; gap: var(--s3); cursor: pointer; list-style: none;
+  padding: var(--s4) var(--s5); font-weight: 600; font-family: var(--font-display), system-ui, sans-serif;
+}
+.data-source > summary::-webkit-details-marker { display: none; }
+.data-source > summary::before { content: "▸"; margin-right: var(--s2); color: var(--ink2); transition: transform 150ms var(--ease); display: inline-block; }
+.data-source[open] > summary::before { transform: rotate(90deg); }
+.data-source > :not(summary) { margin-inline: var(--s5); }
+.data-source > :last-child { margin-bottom: var(--s5); }
+.data-source-title { flex: 1; }
+.data-source-count { font-size: 0.8125rem; font-weight: 400; }
+.data-meta { display: grid; gap: var(--s2); margin: var(--s3) var(--s5); }
+.data-meta > div { display: grid; grid-template-columns: 10rem 1fr; gap: var(--s3); align-items: baseline; }
+.data-meta dt { color: var(--ink2); font-size: 0.8125rem; }
+.data-meta dd { margin: 0; overflow-wrap: anywhere; font-size: 0.8125rem; }
+@media (max-width: 640px) { .data-meta > div { grid-template-columns: 1fr; gap: 0; } }
+.data-fields td, .data-concepts td { vertical-align: top; }
+.data-fields .pill { margin: 0 var(--s1) var(--s1) 0; }
+.data-sample { margin: var(--s2) 0 0; padding: var(--s3); overflow-x: auto; font: 0.78rem/1.5 var(--font-mono), ui-monospace, monospace; background: var(--glass-bg-strong); border: 1px solid var(--line); border-radius: var(--radius-sm); white-space: pre; }
+.data-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: var(--s4); align-items: start; }
+.data-example { max-width: 24rem; min-width: 9rem; overflow-wrap: break-word; font-size: 0.85rem; }
+.break-any { overflow-wrap: anywhere; word-break: break-word; }
+.stat-hint { margin: var(--s1) 0 0; font-size: 0.75rem; }
