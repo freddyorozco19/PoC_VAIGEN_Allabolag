@@ -815,7 +815,8 @@ fn sortable_th(c: &Ctx, label: &str, col: &str, q: &str, sort: Option<&str>, dir
 }
 
 /// Búsquedas de ejemplo (empresas reales conocidas) para la portada del buscador y el estado vacío fuera del modo demo.
-const REAL_EXAMPLES: [&str; 4] = ["Volvo", "Spotify", "Ericsson", "556703-7485"];
+/// (texto del botón, búsqueda): empresas reales con cifras completas (cotizadas por ESEF y una pyme por Bolagsverket).
+const REAL_EXAMPLES: [(&str, &str); 4] = [("Volvo", "556012-5790"), ("Ericsson", "556016-0680"), ("H&M", "556042-7220"), ("Deniz Fastigheter", "559300-6280")];
 
 const SEARCH_SCRIPT: &str = r#"(function(){var i=document.getElementById('q');if(!i)return;
 if(i.value&&location.search.indexOf('q=')>-1&&!document.querySelector('[aria-sort]')){i.focus();var n=i.value.length;try{i.setSelectionRange(n,n);}catch(e){}}
@@ -927,7 +928,7 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
                     h2.card-title { (c.t("sok.intro.title")) }
                     p { (c.t("sok.intro.text")) }
                     p.muted.intro-try { (c.t("sok.try")) }
-                    div.chips.chips-left { @for q in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (q) } } }
+                    div.chips.chips-left { @for (label, q) in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (label) } } }
                 }
             } @else {
             p.result-count role="status" { (count_text) }
@@ -982,7 +983,7 @@ pub fn sok_page(c: &Ctx, query: &str, sort: Option<&str>, dir: Option<&str>, liv
                                                 a.chip href=(sok_url("559108-7721", None)) { "559108-7721" }
                                                 a.chip href="/sok" { (c.t("sok.empty.all")) }
                                             } @else {
-                                                @for q in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (q) } }
+                                                @for (label, q) in REAL_EXAMPLES { a.chip href=(sok_url(q, None)) { (label) } }
                                             }
                                         }
                                     }
@@ -1539,11 +1540,12 @@ pub fn financials_fragment(c: &Ctx, org: &Organisation, fin: Option<&Financials>
             } @else {
                 p.muted { (c.t("bok.none")) }
                 p.note { (c.t("bok.none_note")) }
+                (crate::views_fin::group_note(c, org))
                 p.note { (c.t("bok.none_why")) }
                 h3.card-subtitle { (c.t("bok.none_examples")) }
                 div.chips.chips-left {
-                    @for n in crate::views_fin::EXAMPLES_WITH_ACCOUNTS {
-                        @if n != org.organisationsnummer { a.chip href=(format!("/foretag/{n}")) { (format_orgnr(n)) } }
+                    @for (n, label) in crate::views_fin::EXAMPLES_WITH_ACCOUNTS {
+                        @if n != org.organisationsnummer { a.chip href=(format!("/foretag/{n}")) { @if label.is_empty() { (format_orgnr(n)) } @else { (label) } } }
                     }
                 }
             }

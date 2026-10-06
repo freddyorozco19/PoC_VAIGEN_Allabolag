@@ -294,9 +294,9 @@ async fn run_cli(args: &[String]) -> bool {
                 let fin = annual_report::merge_raw(&reports);
                 println!("{} informes ESEF leídos; cifras consolidadas en tkr:", reports.len());
                 let n = |v: Option<i64>| v.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
-                println!("{:<6} {:>14} {:>14} {:>14} {:>14} {:>14}", "año", "facturación", "res.explot.", "res.antes imp.", "activos", "patrimonio");
+                println!("{:<10} {:>14} {:>14} {:>14} {:>14} {:>14}", "cierre", "facturación", "res.explot.", "res.antes imp.", "activos", "patrimonio");
                 for y in &fin.years {
-                    println!("{:<6} {:>14} {:>14} {:>14} {:>14} {:>14}", y.label, n(y.revenue), n(y.operating_result), n(y.result), n(y.assets), n(y.equity));
+                    println!("{:<10} {:>14} {:>14} {:>14} {:>14} {:>14}", y.period_end, n(y.revenue), n(y.operating_result), n(y.result), n(y.assets), n(y.equity));
                 }
             }
             true

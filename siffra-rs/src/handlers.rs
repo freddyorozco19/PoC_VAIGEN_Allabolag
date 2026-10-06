@@ -188,6 +188,12 @@ pub async fn company_bokslut(State(st): State<AppState>, Extension(info): Info, 
     match tools::load_analysis(&org, c.lang).await {
         Ok(a) => {
             tools::record_snapshot(&st, &a.org, a.fin.as_ref(), a.medians.as_ref());
+            // Sin cuentas: ¿pertenece a un grupo cuya matriz sí las tiene (ESEF)? Se averigua aquí para pintarlo en la ficha.
+            if !a.fin.as_ref().is_some_and(|f| f.latest().is_some()) {
+                if let Err(e) = crate::esef::group_of(&a.org.organisationsnummer).await {
+                    eprintln!("ESEF grupo {}: {e}", a.org.organisationsnummer);
+                }
+            }
             // Los informes ya están guardados con todos sus hechos: las pestañas de personas y de datos salen de ahí.
             match p.tab.as_deref() {
                 Some("fin") => html(views_fin::finance_tab(&c, &a.org, a.fin.as_ref(), a.medians.as_ref())),

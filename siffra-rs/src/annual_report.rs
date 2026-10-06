@@ -515,7 +515,9 @@ fn field_for(local: &str) -> Option<Field> {
 /// amortizaciones): es mejor dejarlos sin dato que mostrarlos con otro significado.
 fn ifrs_fields(local: &str) -> &'static [Field] {
     match local {
-        "Revenue" | "RevenueFromContractsWithCustomers" => &[Field::Revenue],
+        // Distintas formas de declarar la facturación (ver `ifrs_priority`): industria, venta de bienes y, en bancos y
+        // aseguradoras, el total de ingresos de explotación.
+        "Revenue" | "RevenueFromContractsWithCustomers" | "RevenueFromSaleOfGoods" | "RevenueAndOperatingIncome" => &[Field::Revenue],
         "ProfitLossFromOperatingActivities" => &[Field::OperatingResult],
         // IFRS no tiene "resultado después de partidas financieras": es el resultado antes de impuestos.
         "ProfitLossBeforeTax" => &[Field::ResultBeforeTax, Field::ResultAfterFinancial],
@@ -534,6 +536,18 @@ fn ifrs_fields(local: &str) -> &'static [Field] {
         "TradeAndOtherCurrentPayables" => &[Field::TradePayables],
         "AverageNumberOfEmployees" => &[Field::Employees],
         _ => &[],
+    }
+}
+
+/// Si un informe trae varias formas de la misma cifra, gana la de menor número: la facturación propiamente dicha
+/// antes que la venta de bienes (p. ej. SCA) y esta antes que el total de ingresos de explotación (bancos).
+fn ifrs_priority(local: &str) -> u8 {
+    match local {
+        "Revenue" => 0,
+        "RevenueFromContractsWithCustomers" => 1,
+        "RevenueFromSaleOfGoods" => 2,
+        "RevenueAndOperatingIncome" => 3,
+        _ => 0,
     }
 }
 
@@ -592,7 +606,7 @@ pub fn mapped_members(concept: &str) -> Vec<&'static str> {
 /// Para cada (campo, fin de periodo) gana el hecho más preciso (menor `scale`) y, a igualdad, el del informe más reciente.
 /// Solo cuentan los hechos del total de la empresa (sin desglose) de un instante o de un ejercicio de ~12 meses.
 pub fn merge_raw(reports: &[Vec<RawFact>]) -> Financials {
-    let mut best: BTreeMap<(Field, String), (i32, usize, f64)> = BTreeMap::new();
+    let mut best: BTreeMap<(Field, String), (i32, usize, u8, f64)> = BTreeMap::new();
     for (rank, facts) in reports.iter().enumerate() {
         for f in facts {
             if !f.dims.is_empty() {
@@ -607,9 +621,9 @@ pub fn merge_raw(reports: &[Vec<RawFact>]) -> Financials {
             let Some(period_end) = (if f.instant.is_some() { f.instant.clone() } else if f.is_full_year() { f.end.clone() } else { None }) else { continue };
             for &field in fields {
                 let key = (field, period_end.clone());
-                let candidate = (f.scale, rank, value);
+                let candidate = (f.scale, rank, if swedish.is_some() { 0 } else { ifrs_priority(f.local()) }, value);
                 match best.get(&key) {
-                    Some(current) if (current.0, current.1) <= (candidate.0, candidate.1) => {}
+                    Some(current) if (current.0, current.1, current.2) <= (candidate.0, candidate.1, candidate.2) => {}
                     _ => {
                         best.insert(key, candidate);
                     }
@@ -621,7 +635,7 @@ pub fn merge_raw(reports: &[Vec<RawFact>]) -> Financials {
     let mut years: Vec<FinancialYear> = ends
         .into_iter()
         .map(|end| {
-            let raw = |f: Field| best.get(&(f, end.clone())).map(|(_, _, v)| *v);
+            let raw = |f: Field| best.get(&(f, end.clone())).map(|(_, _, _, v)| *v);
             let tkr = |f: Field| raw(f).map(|sek| (sek / 1000.0).round() as i64);
             let goods = match (tkr(Field::Materials), tkr(Field::GoodsForResale)) {
                 (None, None) => None,

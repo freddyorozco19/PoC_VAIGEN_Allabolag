@@ -115,6 +115,13 @@ momento de escribir esto, con retraso respecto a la presentación). Lo que ya se
 - `SIFFRA_ESEF=0` apaga esta fuente; `SIFFRA_GLEIF_URL` / `SIFFRA_XBRL_URL` cambian las direcciones (las pruebas usan
   servidores simulados y sin ellas no salen a la red). `siffra-rs esef-check <orgnr>` muestra lo que se encontraría.
 - No cubre empresas no cotizadas sin informe digital (p. ej. Spotify AB, filial de una sociedad luxemburguesa).
+- **Cobertura de bancos e industriales:** la facturación se toma de `Revenue`, `RevenueFromContractsWithCustomers`,
+  `RevenueFromSaleOfGoods` o `RevenueAndOperatingIncome` (en ese orden de preferencia; bancos y aseguradoras solo traen
+  el último). Si un ejercicio queda sin cifras clave (p. ej. el informe siguiente lo trae con errores de transformación
+  XBRL) se lee también el informe de ese ejercicio; si el propio informe es defectuoso (Investor 2023) queda sin dato.
+- **Filial → matriz:** sin cuentas, la ficha pregunta a GLEIF por la matriz última (`/lei-records/{LEI}/ultimate-parent`,
+  cacheado 6 h). Si la matriz es sueca y tiene informe ESEF, enlaza a sus cifras consolidadas; si es extranjera, solo
+  nombra el grupo.
 
 ## Pantalla Datos (`/datos`)
 

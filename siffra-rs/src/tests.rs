@@ -1342,7 +1342,7 @@ async fn without_demo_mode_there_are_no_fictional_companies_or_screens() {
     // Portada del buscador: invitación a buscar y empresas reales conocidas, sin lista ni nota de ejemplo.
     let r = f.get(&f.user_s, "/sok?lang=es").await;
     assert_eq!(r.status, StatusCode::OK);
-    for needle in ["Busca una empresa sueca", "Prueba con:", "Volvo", "Spotify", "Los datos son reales"] {
+    for needle in ["Busca una empresa sueca", "Prueba con:", "Volvo", "Ericsson", "Los datos son reales"] {
         assert!(r.body.contains(needle), "falta {needle:?}");
     }
     for banned in ["Nordlys", "Fjällbruk", "Kvarn", "EJEMPLO", "Datos de demostración", "<tbody"] {
@@ -1362,7 +1362,7 @@ async fn without_demo_mode_there_are_no_fictional_companies_or_screens() {
     // Buscar un nombre de ejemplo no devuelve nada, y el estado vacío propone búsquedas reales.
     let q = f.get(&f.user_s, "/sok?q=nordlys&lang=es").await.body;
     assert!(q.contains("Sin resultados") && !q.contains("Nordlys Logistik"));
-    assert!(q.contains(r#"href="/sok?q=Volvo""#));
+    assert!(q.contains(r#"href="/sok?q=556012-5790""#) && q.contains(">Volvo<"));
     // En modo demo, en cambio, todo sigue ahí.
     let demo = fx();
     assert!(demo.get(&demo.user_s, "/sok?q=nordlys").await.body.contains("Nordlys Logistik AB"));
@@ -1761,7 +1761,7 @@ fn companies_without_digital_accounts_get_an_explanation_and_examples() {
         }
     }
     let es = crate::views_fin::finance_tab(&Ctx::new(Lang::Es), &org, None, None).into_string();
-    assert!(es.contains("iXBRL") && es.contains("556970-5329"));
+    assert!(es.contains("iXBRL") && es.contains("556970-5329") && es.contains(">Ericsson<"));
 }
 
 // ───────────────────────── Complemento ESEF (cotizadas) ─────────────────────────
@@ -1791,11 +1791,25 @@ async fn fake_esef_world(downloads: std::sync::Arc<std::sync::atomic::AtomicUsiz
                 { "id": "AAAAAAAAAAAAAAAAAAAA", "attributes": { "registration": { "status": "LAPSED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000001" } } } },
                 { "id": "549300HGV012CNC8JD22", "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000544" } } } }
             ])
+        } else if wanted == "556999-1259" || wanted == "556999-1267" {
+            // Filiales: la primera tiene matriz sueca con informe ESEF, la segunda una matriz extranjera.
+            let lei = if wanted == "556999-1259" { "CCCCCCCCCCCCCCCCCCCC" } else { "DDDDDDDDDDDDDDDDDDDD" };
+            json!([{ "id": lei, "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": wanted, "registeredAt": { "id": "RA000544" } } } }])
         } else if wanted == "5569991242" {
             // Registrada SIN guion (como H&M o Atlas Copco en GLEIF): solo la segunda forma de búsqueda la encuentra.
             json!([{ "id": "549300HGV012CNC8JD22", "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": "5569991242", "registeredAt": { "id": "RA000544" } } } }])
         } else {
             json!([])
+        };
+        Json(json!({ "data": data })).into_response()
+    }
+    async fn parent(Path(lei): Path<String>) -> Response {
+        let data = match lei.as_str() {
+            "CCCCCCCCCCCCCCCCCCCC" => json!({ "id": "549300HGV012CNC8JD22", "attributes": { "entity": {
+                "legalName": { "name": "Grupp Moder AB" }, "legalAddress": { "country": "SE" }, "registeredAs": "556042-7220", "registeredAt": { "id": "RA000544" } } } }),
+            "DDDDDDDDDDDDDDDDDDDD" => json!({ "id": "EEEEEEEEEEEEEEEEEEEE", "attributes": { "entity": {
+                "legalName": { "name": "Foreign Holding S.A." }, "legalAddress": { "country": "LU" }, "registeredAs": "B123456", "registeredAt": { "id": "RA000432" } } } }),
+            _ => return StatusCode::NOT_FOUND.into_response(),
         };
         Json(json!({ "data": data })).into_response()
     }
@@ -1844,6 +1858,7 @@ async fn fake_esef_world(downloads: std::sync::Arc<std::sync::atomic::AtomicUsiz
         .route("/vardefulla-datamangder/v1/organisationer", post(orgs))
         .route("/vardefulla-datamangder/v1/dokumentlista", post(docs))
         .route("/lei-records", get(gleif))
+        .route("/lei-records/:lei/ultimate-parent", get(parent))
         .route("/api/entities/:lei/filings", get(filings))
         .route("/files/:name", get(file))
         .with_state(downloads);
@@ -2001,4 +2016,38 @@ fn concepts_know_which_summary_field_they_feed() {
     assert_eq!(annual_report::mapped_members("ifrs-full:RevenueFromContractsWithCustomers"), vec!["revenue"]);
     assert!(annual_report::mapped_members("se-gen-base:AllmantVerksamheten").is_empty(), "se guarda pero no alimenta cifras");
     assert!(annual_report::mapped_members("ifrs-full:Nettoomsattning").is_empty(), "el nombre sueco no vale como IFRS");
+}
+
+#[tokio::test]
+async fn subsidiaries_without_accounts_point_to_their_group() {
+    let _env = lock_bolagsverket_env();
+    let downloads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fake_esef_world(downloads).await;
+    let mut org = bolagsverket::map_organisation(&serde_json::from_str::<serde_json::Value>(bolagsverket::fixtures::AKTIEBOLAG).unwrap(), "5299999994").unwrap();
+
+    // Antes de averiguarlo no se pinta nada del grupo.
+    org.organisationsnummer = "5569991259".into();
+    let before = crate::views_fin::no_accounts_card(&Ctx::new(Lang::Es), &org).into_string();
+    assert!(!before.contains("forma parte del grupo"));
+
+    // Matriz sueca con informe ESEF: enlace a su ficha de Finanzas.
+    let g = crate::esef::group_of("5569991259").await.unwrap().expect("tiene matriz");
+    assert_eq!((g.name.as_str(), g.orgnr.as_deref(), g.has_report), ("Grupp Moder AB", Some("5560427220"), true));
+    let html = crate::views_fin::no_accounts_card(&Ctx::new(Lang::Es), &org).into_string();
+    assert!(html.contains("forma parte del grupo Grupp Moder AB") && html.contains(r#"href="/foretag/5560427220?tab=fin""#), "{html}");
+
+    // Matriz extranjera: solo se informa, sin enlace.
+    org.organisationsnummer = "5569991267".into();
+    crate::esef::group_of("5569991267").await.unwrap();
+    let foreign = crate::views_fin::no_accounts_card(&Ctx::new(Lang::En), &org).into_string();
+    assert!(foreign.contains("Foreign Holding S.A. group (LU)") && !foreign.contains("/foretag/B123456"), "{foreign}");
+
+    // Sin LEI o sin relación de matriz: nada.
+    assert_eq!(crate::esef::group_of("5560427220").await.unwrap(), None, "la propia matriz no tiene matriz");
+    for lang in Lang::ALL {
+        let page = crate::views_fin::no_accounts_card(&Ctx::new(lang), &org).into_string();
+        assert!(!page.contains('⟦'), "{lang:?}");
+    }
+    unset_bolagsverket_env();
+    unset_esef_env();
 }

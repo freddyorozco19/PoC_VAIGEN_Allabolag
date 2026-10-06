@@ -92,6 +92,17 @@ fn date_of(s: &str, end: bool) -> Option<String> {
     util::unix_from_iso(date).map(|_| date.to_string())
 }
 
+/// Algunos informes (p. ej. Handelsbanken) fechan el saldo de apertura del patrimonio el 2 de enero a las 00:00,
+/// que tras restar un día es el 1 de enero: es el cierre del ejercicio anterior (31 de diciembre).
+fn opening_balance_to_year_end(date: String) -> String {
+    if date.ends_with("-01-01") {
+        if let Some(t) = util::unix_from_iso(&date) {
+            return util::iso_from_unix(t - 86_400).get(..10).unwrap_or(&date).to_string();
+        }
+    }
+    date
+}
+
 fn unit_label(unit: &str) -> String {
     unit.split('/').map(|u| u.rsplit(':').next().unwrap_or(u)).collect::<Vec<_>>().join("/")
 }
@@ -115,7 +126,7 @@ pub fn parse_xbrl_json(bytes: &[u8]) -> Result<Vec<RawFact>, String> {
                     start = date_of(a, false);
                     end = date_of(b, true);
                 }
-                None => instant = date_of(period, true),
+                None => instant = date_of(period, true).map(opening_balance_to_year_end),
             }
         }
         let mut axes: Vec<String> = dims
@@ -261,7 +272,12 @@ pub async fn load_reports(store: Option<&Store>, orgnr: &str) -> Result<Vec<Vec<
     let stored: Vec<DocRef> = store
         .map(|s| s.db.reports_of(orgnr).into_iter().filter(|r| is_esef_doc(&r.doc_id)).map(|r| DocRef { id: r.doc_id, period_end: r.period_end, registered: r.registered }).collect())
         .unwrap_or_default();
-    let from_store = |docs: Vec<DocRef>| -> Vec<Vec<RawFact>> { pick_reports(docs).iter().filter_map(|d| store.and_then(|s| s.db.report_facts(&d.id))).collect() };
+    // De lo guardado se sirve TODO (más reciente primero): incluye los informes extra que se bajaron para tapar huecos.
+    let from_store = |mut docs: Vec<DocRef>| -> Vec<Vec<RawFact>> {
+        docs.sort_by(|a, b| b.period_end.cmp(&a.period_end).then(b.registered.cmp(&a.registered)));
+        docs.dedup_by(|b, a| a.period_end == b.period_end);
+        docs.iter().take(MAX_STORED_REPORTS).filter_map(|d| store.and_then(|s| s.db.report_facts(&d.id))).collect()
+    };
     let newest_fetch = store.and_then(|s| s.db.reports_of(orgnr).into_iter().filter(|r| is_esef_doc(&r.doc_id)).map(|r| r.fetched_at).max());
     if let Some(at) = &newest_fetch {
         if util::days_since(at) < REFRESH_DAYS {
@@ -280,40 +296,155 @@ pub async fn load_reports(store: Option<&Store>, orgnr: &str) -> Result<Vec<Vec<
     }
 }
 
+/// Máximo de informes ESEF que se combinan (5 ejercicios).
+const MAX_STORED_REPORTS: usize = 5;
+
+/// Lee un informe (de lo guardado o bajándolo) y lo guarda. `Ok(None)` si no se puede usar (ilegible, otra moneda…).
+async fn load_one(store: Option<&Store>, base: &str, orgnr: &str, filings: &[Filing], doc: &DocRef, essential: bool) -> Result<Option<Vec<RawFact>>, String> {
+    if let Some(facts) = store.and_then(|s| s.db.report_facts(&doc.id)) {
+        return Ok(Some(facts));
+    }
+    // Entre varias versiones del mismo ejercicio (sueco/inglés, reenvíos) gana la registrada más tarde.
+    let Some(filing) = filings.iter().filter(|f| f.period_end == doc.period_end).max_by(|a, b| a.registered.cmp(&b.registered)) else { return Ok(None) };
+    let bytes = match download_json(base, &filing.json_url).await {
+        Ok(b) => b,
+        Err(e) if essential => return Err(e),
+        Err(e) => {
+            eprintln!("ESEF {orgnr} {}: {e}", doc.period_end);
+            return Ok(None);
+        }
+    };
+    match parse_xbrl_json(&bytes) {
+        Ok(facts) => {
+            if let Some(s) = store {
+                s.save_esef(orgnr, doc, &bytes, &facts);
+            }
+            Ok(Some(facts))
+        }
+        // Un informe ilegible o en otra moneda no se muestra, pero tampoco hace fallar la ficha.
+        Err(e) => {
+            eprintln!("ESEF {orgnr} {}: {e}", doc.period_end);
+            Ok(None)
+        }
+    }
+}
+
+/// Ejercicios entre los cubiertos que quedaron sin ninguna cifra clave (p. ej. el informe más reciente trae el año
+/// anterior con errores de transformación XBRL): hay que leer el informe de ese propio ejercicio.
+fn empty_years(reports: &[(String, Vec<RawFact>)]) -> Vec<String> {
+    let mut sorted: Vec<&(String, Vec<RawFact>)> = reports.iter().collect();
+    sorted.sort_by(|a, b| b.0.cmp(&a.0));
+    let facts: Vec<Vec<RawFact>> = sorted.iter().map(|(_, f)| f.clone()).collect();
+    crate::annual_report::merge_raw(&facts)
+        .years
+        .iter()
+        .filter(|y| y.revenue.is_none() && y.result.is_none() && y.assets.is_none() && y.equity.is_none())
+        .map(|y| y.period_end.clone())
+        .collect()
+}
+
 async fn fetch(store: Option<&Store>, gleif: &str, filings_base: &str, orgnr: &str) -> Result<Vec<Vec<RawFact>>, String> {
     let Some(lei) = lei_for(gleif, orgnr).await? else { return Ok(vec![]) };
     let filings = list_filings(filings_base, &lei).await?;
     let docs: Vec<DocRef> = filings.iter().map(|f| DocRef { id: format!("{DOC_PREFIX}{lei}-{}", f.period_end), period_end: f.period_end.clone(), registered: f.registered.clone() }).collect();
-    let picked = pick_reports(docs);
+    let picked = pick_reports(docs.clone());
 
-    let mut reports = Vec::new();
+    let mut loaded: Vec<(String, Vec<RawFact>)> = Vec::new();
     for (i, doc) in picked.iter().enumerate() {
-        if let Some(facts) = store.and_then(|s| s.db.report_facts(&doc.id)) {
-            reports.push(facts);
-            continue;
-        }
-        // Entre varias versiones del mismo ejercicio (sueco/inglés, reenvíos) gana la registrada más tarde.
-        let Some(filing) = filings.iter().filter(|f| f.period_end == doc.period_end).max_by(|a, b| a.registered.cmp(&b.registered)) else { continue };
-        let bytes = match download_json(filings_base, &filing.json_url).await {
-            Ok(b) => b,
-            Err(e) if i > 0 => {
-                eprintln!("ESEF {orgnr} {}: {e}", doc.period_end);
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        match parse_xbrl_json(&bytes) {
-            Ok(facts) => {
-                if let Some(s) = store {
-                    s.save_esef(orgnr, doc, &bytes, &facts);
-                }
-                reports.push(facts);
-            }
-            // Un informe ilegible o en otra moneda no se muestra, pero tampoco hace fallar la ficha.
-            Err(e) => eprintln!("ESEF {orgnr} {}: {e}", doc.period_end),
+        if let Some(facts) = load_one(store, filings_base, orgnr, &filings, doc, i == 0).await? {
+            loaded.push((doc.period_end.clone(), facts));
         }
     }
-    Ok(reports)
+    // Huecos: un ejercicio sin cifras que tiene su propio informe en el índice se lee también.
+    for year in empty_years(&loaded) {
+        if loaded.len() >= MAX_STORED_REPORTS || loaded.iter().any(|(p, _)| *p == year) {
+            continue;
+        }
+        let Some(doc) = pick_one(&docs, &year) else { continue };
+        if let Some(facts) = load_one(store, filings_base, orgnr, &filings, doc, false).await? {
+            loaded.push((year, facts));
+        }
+    }
+    loaded.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(loaded.into_iter().map(|(_, f)| f).collect())
+}
+
+/// El documento de un ejercicio concreto (el registrado más tarde).
+fn pick_one<'a>(docs: &'a [DocRef], period_end: &str) -> Option<&'a DocRef> {
+    docs.iter().filter(|d| d.period_end == period_end).max_by(|a, b| a.registered.cmp(&b.registered))
+}
+
+
+// ───────────── Grupo al que pertenece una sociedad ─────────────
+
+/// Sociedad matriz última de una organización (según GLEIF), para enlazar a las cifras consolidadas del grupo.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub name: String,
+    /// Código de país ISO de la sede legal ("SE", "LU"…).
+    pub country: String,
+    /// Número de organización (10 dígitos) si la matriz está registrada en Bolagsverket.
+    pub orgnr: Option<String>,
+    /// La matriz tiene informes ESEF en el índice: su ficha trae cifras consolidadas.
+    pub has_report: bool,
+}
+
+const GROUP_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+type GroupCache = std::collections::HashMap<String, (std::time::Instant, Option<Group>)>;
+static GROUPS: LazyLock<std::sync::Mutex<GroupCache>> = LazyLock::new(|| std::sync::Mutex::new(GroupCache::new()));
+
+/// Lo que ya se sabe del grupo de una organización, sin consultar la red (la ficha lo pinta si está).
+pub fn cached_group(orgnr: &str) -> Option<Group> {
+    let guard = GROUPS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(orgnr).filter(|(at, _)| at.elapsed() < GROUP_TTL).and_then(|(_, g)| g.clone())
+}
+
+/// Busca la matriz última de una organización en GLEIF y la recuerda 6 horas. `Ok(None)`: no pertenece a un grupo
+/// que declare su matriz (o la fuente está apagada). Un fallo de red no se recuerda.
+pub async fn group_of(orgnr: &str) -> Result<Option<Group>, String> {
+    if let Some((at, g)) = GROUPS.lock().unwrap_or_else(|e| e.into_inner()).get(orgnr) {
+        if at.elapsed() < GROUP_TTL {
+            return Ok(g.clone());
+        }
+    }
+    let (Some(gleif), Some(filings_base)) = (endpoint("SIFFRA_GLEIF_URL", DEFAULT_GLEIF), endpoint("SIFFRA_XBRL_URL", DEFAULT_FILINGS)) else {
+        return Ok(None);
+    };
+    let group = find_group(&gleif, &filings_base, orgnr).await?;
+    GROUPS.lock().unwrap_or_else(|e| e.into_inner()).insert(orgnr.to_string(), (std::time::Instant::now(), group.clone()));
+    Ok(group)
+}
+
+async fn find_group(gleif: &str, filings_base: &str, orgnr: &str) -> Result<Option<Group>, String> {
+    let Some(lei) = lei_for(gleif, orgnr).await? else { return Ok(None) };
+    let res = CLIENT.get(format!("{gleif}/lei-records/{lei}/ultimate-parent")).header("Accept", "application/vnd.api+json").send().await.map_err(|e| format!("GLEIF: {e}"))?;
+    // 404: sin relación de matriz declarada.
+    if res.status().as_u16() == 404 {
+        return Ok(None);
+    }
+    if !res.status().is_success() {
+        return Err(format!("GLEIF: error HTTP {}", res.status().as_u16()));
+    }
+    let body: Value = res.json().await.map_err(|e| format!("GLEIF: respuesta no válida: {e}"))?;
+    let Some(parent) = body.get("data").filter(|d| d.is_object()) else { return Ok(None) };
+    let parent_lei = parent.get("id").and_then(Value::as_str).unwrap_or("");
+    let entity = parent.pointer("/attributes/entity");
+    let Some(name) = entity.and_then(|e| e.pointer("/legalName/name")).and_then(Value::as_str) else { return Ok(None) };
+    if parent_lei == lei || !valid_lei(parent_lei) {
+        return Ok(None);
+    }
+    let country = entity.and_then(|e| e.pointer("/legalAddress/country")).and_then(Value::as_str).unwrap_or("").to_string();
+    let swedish = entity.and_then(|e| e.pointer("/registeredAt/id")).and_then(Value::as_str) == Some(SWEDEN_RA);
+    let parent_orgnr = entity
+        .and_then(|e| e.get("registeredAs"))
+        .and_then(Value::as_str)
+        .map(|r| r.replace('-', ""))
+        .filter(|r| swedish && r.len() == 10 && r.bytes().all(|b| b.is_ascii_digit()) && r != orgnr);
+    let has_report = match &parent_orgnr {
+        Some(_) => !list_filings(filings_base, parent_lei).await.unwrap_or_default().is_empty(),
+        None => false,
+    };
+    Ok(Some(Group { name: name.to_string(), country, orgnr: parent_orgnr, has_report }))
 }
 
 #[cfg(test)]
@@ -327,6 +458,52 @@ mod tests {
         assert_eq!(date_of("2024-03-01T00:00:00", true).as_deref(), Some("2024-02-29"), "año bisiesto");
         assert_eq!(date_of("2024-12-31", true).as_deref(), Some("2024-12-31"), "sin hora no se mueve");
         assert_eq!(date_of("nonsense", true), None);
+    }
+
+    fn ifrs(concept: &str, value: f64, period_end: &str, instant: bool) -> RawFact {
+        RawFact {
+            concept: concept.into(), ctx: String::new(), value: Some(value), text: None, unit: Some("SEK".into()), scale: 0,
+            instant: instant.then(|| period_end.to_string()),
+            start: (!instant).then(|| format!("{}-01-01", &period_end[..4])),
+            end: (!instant).then(|| period_end.to_string()),
+            dims: String::new(),
+        }
+    }
+
+    #[test]
+    fn revenue_comes_from_the_best_available_ifrs_concept() {
+        use crate::annual_report::merge_raw;
+        // SCA: venta de bienes y total de ingresos de explotación -> gana la venta de bienes.
+        let sca = vec![ifrs("ifrs-full:RevenueAndOperatingIncome", 23_627e6, "2024-12-31", false), ifrs("ifrs-full:RevenueFromSaleOfGoods", 20_232e6, "2024-12-31", false)];
+        assert_eq!(merge_raw(&[sca]).years[0].revenue, Some(20_232_000));
+        // Un banco solo trae el total de ingresos de explotación.
+        let bank = vec![ifrs("ifrs-full:RevenueAndOperatingIncome", 62_345e6, "2024-12-31", false)];
+        assert_eq!(merge_raw(&[bank]).years[0].revenue, Some(62_345_000));
+        // Si viene la facturación propiamente dicha, esa manda sea cual sea el orden.
+        let both = vec![ifrs("ifrs-full:RevenueFromSaleOfGoods", 1e9, "2024-12-31", false), ifrs("ifrs-full:Revenue", 5e9, "2024-12-31", false)];
+        assert_eq!(merge_raw(&[both]).years[0].revenue, Some(5_000_000));
+    }
+
+    #[test]
+    fn years_without_any_key_figure_are_detected_so_their_own_report_is_read() {
+        // El informe 2024 trae 2023 con errores de transformación (sin valor): solo queda una fila vacía.
+        let mut r2024 = vec![ifrs("ifrs-full:Assets", 952e9, "2024-12-31", true), ifrs("ifrs-full:Revenue", 63e9, "2024-12-31", false)];
+        let mut empty = ifrs("ifrs-full:Assets", 0.0, "2023-12-31", true);
+        empty.value = None;
+        r2024.push(empty);
+        r2024.push(ifrs("ifrs-full:ProfitLossFromOperatingActivities", 1e9, "2023-12-31", false));
+        let years = empty_years(&[("2024-12-31".to_string(), r2024)]);
+        assert_eq!(years, vec!["2023-12-31".to_string()], "2023 solo tiene el resultado de explotación: sin facturación, resultado ni balance");
+    }
+
+    #[test]
+    fn opening_balances_dated_on_the_second_of_january_close_the_previous_year() {
+        let json = serde_json::json!({ "facts": {
+            "a": { "value": "171473000000", "dimensions": { "concept": "ifrs-full:Equity", "entity": "scheme:X", "period": "2021-01-02T00:00:00", "unit": "iso4217:SEK" } },
+            "b": { "value": "171473000000", "dimensions": { "concept": "ifrs-full:Equity", "entity": "scheme:X", "period": "2021-01-01T00:00:00", "unit": "iso4217:SEK" } }
+        } });
+        let facts = parse_xbrl_json(json.to_string().as_bytes()).unwrap();
+        assert!(facts.iter().all(|f| f.instant.as_deref() == Some("2020-12-31")), "{:?}", facts.iter().map(|f| &f.instant).collect::<Vec<_>>());
     }
 
     #[test]

@@ -339,8 +339,24 @@ fn statement_table(c: &Ctx, caption: &str, years: &[&FinancialYear], rows: Marku
     }
 }
 
-/// Empresas reales con cuentas digitales completas, para probar las pestañas desde el estado vacío.
-pub const EXAMPLES_WITH_ACCOUNTS: [&str; 4] = ["5593006280", "5569705329", "5591106074", "5565877759"];
+/// Empresas reales con cifras completas (número, nombre; sin nombre se muestra el número), para probar las pestañas desde el estado vacío.
+pub const EXAMPLES_WITH_ACCOUNTS: [(&str, &str); 4] = [("5560160680", "Ericsson"), ("5560125790", "Volvo"), ("5593006280", "Deniz Fastigheter"), ("5569705329", "")];
+
+/// Si la sociedad pertenece a un grupo (según GLEIF), lo dice y, si la matriz tiene cifras consolidadas ESEF, enlaza a ellas.
+/// Solo pinta lo que ya se averiguó (la ficha lo pide antes de dibujarse); sin ello no muestra nada.
+pub fn group_note(c: &Ctx, org: &Organisation) -> Markup {
+    let Some(g) = crate::esef::cached_group(&org.organisationsnummer) else { return html! {} };
+    html! {
+        @match (&g.orgnr, g.has_report) {
+            (Some(parent), true) => {
+                p.note.group-note { (c.tf("bok.group_report", &[g.name.as_str()])) " " a href=(format!("/foretag/{parent}?tab=fin")) { (c.tf("bok.group_report_link", &[g.name.as_str()])) } }
+            }
+            _ => {
+                p.note.group-note { (c.tf("bok.group_other", &[g.name.as_str(), g.country.as_str()])) }
+            }
+        }
+    }
+}
 
 /// Estado vacío cuando Bolagsverket no tiene un informe digital: por qué, qué sí hay y empresas con datos completos.
 pub fn no_accounts_card(c: &Ctx, org: &Organisation) -> Markup {
@@ -348,13 +364,14 @@ pub fn no_accounts_card(c: &Ctx, org: &Organisation) -> Markup {
         div.card.mt-4 {
             p.muted { (c.t("bok.none")) }
             p.note { (c.t("bok.none_note")) }
+            (group_note(c, org))
             p.note { (c.t("bok.none_why")) }
             p.note { a href=(format!("/foretag/{}", org.organisationsnummer)) { (c.t("bok.none_registry")) } }
             h3.card-subtitle { (c.t("bok.none_examples")) }
             div.chips.chips-left {
-                @for n in EXAMPLES_WITH_ACCOUNTS {
+                @for (n, label) in EXAMPLES_WITH_ACCOUNTS {
                     @if n != org.organisationsnummer {
-                        a.chip href=(format!("/foretag/{n}")) { (crate::views::format_orgnr(n)) }
+                        a.chip href=(format!("/foretag/{n}")) { @if label.is_empty() { (crate::views::format_orgnr(n)) } @else { (label) } }
                     }
                 }
             }
