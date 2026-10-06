@@ -165,29 +165,36 @@ async fn lei_for(gleif: &str, orgnr: &str) -> Result<Option<String>, String> {
     if orgnr.len() != 10 || !orgnr.bytes().all(|b| b.is_ascii_digit()) {
         return Ok(None);
     }
-    let formatted = format!("{}-{}", &orgnr[..6], &orgnr[6..]);
-    let res = CLIENT
-        .get(format!("{gleif}/lei-records"))
-        .query(&[("filter[entity.registeredAs]", formatted.as_str()), ("page[size]", "10")])
-        .header("Accept", "application/vnd.api+json")
-        .send()
-        .await
-        .map_err(|e| format!("GLEIF: {e}"))?;
-    if !res.status().is_success() {
-        return Err(format!("GLEIF: error HTTP {}", res.status().as_u16()));
-    }
-    let body: Value = res.json().await.map_err(|e| format!("GLEIF: respuesta no válida: {e}"))?;
+    // GLEIF guarda el número tal como lo escribió quien pidió el LEI: unos con guion (556016-0680), otros sin él
+    // (5560427220, p. ej. H&M o Atlas Copco). Se prueban las dos formas.
+    let forms = [format!("{}-{}", &orgnr[..6], &orgnr[6..]), orgnr.to_string()];
     let mut best: Option<(bool, String)> = None;
-    for rec in body.get("data").and_then(Value::as_array).into_iter().flatten() {
-        let (Some(lei), Some(entity)) = (rec.get("id").and_then(Value::as_str), rec.pointer("/attributes/entity")) else { continue };
-        let registered_in_sweden = entity.pointer("/registeredAt/id").and_then(Value::as_str) == Some(SWEDEN_RA);
-        let registered_as = entity.get("registeredAs").and_then(Value::as_str).unwrap_or("").replace('-', "");
-        if !valid_lei(lei) || !registered_in_sweden || registered_as != orgnr {
-            continue;
+    for form in &forms {
+        let res = CLIENT
+            .get(format!("{gleif}/lei-records"))
+            .query(&[("filter[entity.registeredAs]", form.as_str()), ("page[size]", "10")])
+            .header("Accept", "application/vnd.api+json")
+            .send()
+            .await
+            .map_err(|e| format!("GLEIF: {e}"))?;
+        if !res.status().is_success() {
+            return Err(format!("GLEIF: error HTTP {}", res.status().as_u16()));
         }
-        let issued = rec.pointer("/attributes/registration/status").and_then(Value::as_str) == Some("ISSUED");
-        if best.as_ref().map(|(i, _)| !*i && issued).unwrap_or(true) {
-            best = Some((issued, lei.to_string()));
+        let body: Value = res.json().await.map_err(|e| format!("GLEIF: respuesta no válida: {e}"))?;
+        for rec in body.get("data").and_then(Value::as_array).into_iter().flatten() {
+            let (Some(lei), Some(entity)) = (rec.get("id").and_then(Value::as_str), rec.pointer("/attributes/entity")) else { continue };
+            let registered_in_sweden = entity.pointer("/registeredAt/id").and_then(Value::as_str) == Some(SWEDEN_RA);
+            let registered_as = entity.get("registeredAs").and_then(Value::as_str).unwrap_or("").replace('-', "");
+            if !valid_lei(lei) || !registered_in_sweden || registered_as != orgnr {
+                continue;
+            }
+            let issued = rec.pointer("/attributes/registration/status").and_then(Value::as_str) == Some("ISSUED");
+            if best.as_ref().map(|(i, _)| !*i && issued).unwrap_or(true) {
+                best = Some((issued, lei.to_string()));
+            }
+        }
+        if best.is_some() {
+            break;
         }
     }
     Ok(best.map(|(_, lei)| lei))

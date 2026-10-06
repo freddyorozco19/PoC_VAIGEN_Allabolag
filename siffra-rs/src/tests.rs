@@ -1790,6 +1790,9 @@ async fn fake_esef_world(downloads: std::sync::Arc<std::sync::atomic::AtomicUsiz
                 { "id": "AAAAAAAAAAAAAAAAAAAA", "attributes": { "registration": { "status": "LAPSED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000001" } } } },
                 { "id": "549300HGV012CNC8JD22", "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": "556042-7220", "registeredAt": { "id": "RA000544" } } } }
             ])
+        } else if wanted == "5569991242" {
+            // Registrada SIN guion (como H&M o Atlas Copco en GLEIF): solo la segunda forma de búsqueda la encuentra.
+            json!([{ "id": "549300HGV012CNC8JD22", "attributes": { "registration": { "status": "ISSUED" }, "entity": { "registeredAs": "5569991242", "registeredAt": { "id": "RA000544" } } } }])
         } else {
             json!([])
         };
@@ -1920,6 +1923,8 @@ async fn esef_can_be_switched_off_and_never_runs_without_servers_in_tests() {
     let _env = lock_bolagsverket_env();
     let downloads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     fake_esef_world(downloads.clone()).await;
+    // El número registrado sin guion en GLEIF también se encuentra.
+    assert_eq!(crate::esef::load_reports(None, "5569991242").await.unwrap().len(), 1, "registrada sin guion");
     std::env::set_var("SIFFRA_ESEF", "0");
     let reports = crate::esef::load_reports(None, "5560427220").await.unwrap();
     assert!(reports.is_empty(), "apagada con SIFFRA_ESEF=0");
@@ -1927,7 +1932,7 @@ async fn esef_can_be_switched_off_and_never_runs_without_servers_in_tests() {
     std::env::remove_var("SIFFRA_GLEIF_URL");
     std::env::remove_var("SIFFRA_XBRL_URL");
     assert!(crate::esef::load_reports(None, "5560427220").await.unwrap().is_empty(), "sin direcciones configuradas las pruebas no salen a la red");
-    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(downloads.load(std::sync::atomic::Ordering::SeqCst), 1, "solo la descarga de la comprobación sin guion");
     unset_bolagsverket_env();
     unset_esef_env();
 }
